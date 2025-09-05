@@ -178,9 +178,9 @@ SensorDataType::value_type SensorIdentifier::get_internal_type(value_type sensor
         case IMU_ANG_ACC_X:
         case IMU_ANG_ACC_Y:
         case IMU_ANG_ACC_Z:
-            return SensorDataType::F64;
-        default:
             return SensorDataType::F32;
+        default:
+            return SensorDataType::F64;
         }
 }
 

@@ -930,7 +930,7 @@ int galileo_telemetry_decoder_gs::general_work(int noutput_items __attribute__((
 
     // Time Tags from signal source (optional feature)
     std::vector<gr::tag_t> tags_vec;
-    this->get_tags_in_range(tags_vec, 0, this->nitems_read(0), this->nitems_read(0) + 1);  // telemetry decoder consumes symbols one-by-one
+    this->get_tags_in_range(tags_vec, 0, this->nitems_read(0), this->nitems_read(0) + 1, pmt::mp("timetag"));  // telemetry decoder consumes symbols one-by-one
     if (!tags_vec.empty())
         {
             for (const auto &it : tags_vec)
