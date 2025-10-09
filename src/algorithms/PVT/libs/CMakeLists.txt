@@ -27,6 +27,9 @@ set(PVT_LIB_SOURCES
     signal_enabled_flags.cc
     vtl_data.cc
     vtl_core.cc
+    inertial_navigator.cc
+    DCM.cc
+    LooseKF.cc
 )
 
 set(PVT_LIB_HEADERS
@@ -51,6 +54,9 @@ set(PVT_LIB_HEADERS
     geohash.h
     pvt_kf.h
     signal_enabled_flags.h
+    inertial_navigator.h
+    DCM.h
+    LooseKF.h
 )
 
 list(SORT PVT_LIB_HEADERS)

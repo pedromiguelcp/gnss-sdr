@@ -1,0 +1,101 @@
+#pragma once
+/*
+ * Inertial_Navigator.h
+ * Unified Inertial Navigator class: reading, initialization, and ECEF mechanization
+ * Combines ReaderIMU, InitializeIMU, and IMUmechECEF
+ */
+
+#include "DCM.h"
+#include <armadillo>
+#include <cmath>
+#include <fstream>
+#include <iterator>
+#include <sstream>
+#include <string>
+#include <vector>
+
+class Inertial_Navigator
+{
+public:
+    Inertial_Navigator();
+    ~Inertial_Navigator() = default;
+
+    // -------- Data structures --------
+    struct IMUEpochInfo
+    {
+        double imuTime{};
+        arma::vec3 Acc;  // ax, ay, az (m/s^2)
+        arma::vec3 Gyr;  // gx, gy, gz (rad/s)
+    };
+
+    struct IMUPVAEpochInfo
+    {
+        double imuPVATime{};
+        arma::vec3 pos_llh;  // lat, long, h (deg, deg, m)
+        arma::vec3 pos_ecef;
+        arma::vec3 vel_enu;  // v_e, v_n, v_u (m/s)
+        arma::vec3 vel_ecef;
+        arma::vec3 att_rpy;  // roll, pitch, yaw (deg)
+    };
+
+    // -------- File reading --------
+    // Reads one epoch from a Septentrio IMU log. If readHeader=true, skips header line.
+    void readIMU(std::ifstream& fin_raw_imu_file, bool readHeader);
+    void readIMUPVA(std::ifstream& fin_pva_imu_file, bool readHeader);
+
+    void correctVelRPY(std::ifstream& fin_pva_imu_file, double EndTime);
+
+    // -------- ECEF mechanization --------
+    void initializeMechanizer(std::ifstream& fin_raw_imu, std::ifstream& fin_pva_imu, double EndTime, const arma::vec3& iniPOS_ecef,
+        const arma::vec3& iniVEL_ecef);
+
+    // One propagation step (dT seconds)
+    void stepMechanizer(std::ifstream& fin_raw_imu);
+
+    // Predict antenna ECEF position/velocity from IMU-origin state at this epoch
+    void predictAntennaECEF();
+    void predictIMUECEF();
+
+    // Align yaw from a GNSS PVT (position+velocity in ECEF).
+    // yaw_boresight_rad lets you account for any IMU-to-vehicle yaw offset.
+    // If snap_state_to_gnss=true, we also overwrite pos_ecef/vel_ecef with the GNSS values.
+    void alignYawFromGnss(const arma::vec3& pos_ecef_gnss,
+        const arma::vec3& vel_ecef_gnss,
+        double yaw_boresight_rad = 0.0);
+
+    bool yawAligned() const { return yaw_aligned_; }
+
+
+    // -------- Public state --------
+    IMUEpochInfo obs{};         // latest observation read
+    IMUPVAEpochInfo obs_pva{};  // latest observation read
+
+    // Init results
+    arma::vec3 GYRbias_b;
+    arma::vec3 ACCbias_b;
+
+    // Mech state
+    arma::vec3 pos_ecef;      // x,y,z (m)
+    arma::vec3 pos_llh;       // lat, long, height (rad,rad,m)
+    arma::vec3 vel_ecef;      // vx,vy,vz (m/s)
+    arma::vec3 pos_ant_ecef;  // x,y,z (m)
+    arma::vec3 vel_ant_ecef;  // vx,vy,vz (m/s)
+    arma::vec3 att_rpy;       // roll,pitch,yaw (rad)
+    arma::mat Ceb;            // body->ECEF
+    arma::mat Ne;
+    arma::mat Fe;
+    arma::vec3 Lxyz;  // lever arm (m)
+
+private:
+    bool yaw_aligned_ = false;
+
+    double normalise(const double value, const double start, const double end);
+    void NormaliseAttitude(arma::vec3& Vec);
+    arma::mat SkewMat(const arma::vec3& Vec);
+    arma::mat TensorGravGrad(double X, double Y, double Z);
+
+    // GNSS velocity EMA in NED for horizontal-only correction
+    arma::vec3 v_ned_gnss_filt;
+    // Smoothing gains per GNSS epoch
+    double ema_alpha = 0.2;
+};

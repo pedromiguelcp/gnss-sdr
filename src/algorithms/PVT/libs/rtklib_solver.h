@@ -35,6 +35,7 @@
 #define GNSS_SDR_RTKLIB_SOLVER_H
 
 
+#include "LooseKF.h"
 #include "beidou_dnav_almanac.h"
 #include "beidou_dnav_ephemeris.h"
 #include "beidou_dnav_iono.h"
@@ -55,6 +56,7 @@
 #include "gps_ephemeris.h"
 #include "gps_iono.h"
 #include "gps_utc_model.h"
+#include "inertial_navigator.h"
 #include "monitor_pvt.h"
 #include "pvt_conf.h"
 #include "pvt_kf.h"
@@ -130,6 +132,16 @@ public:
     Beidou_Dnav_Iono beidou_dnav_iono;
     std::map<int, Beidou_Dnav_Almanac> beidou_dnav_almanac_map;
 
+    // Input File Stream for IMU
+    std::ifstream fin_raw_imu;
+    std::ifstream fin_pva_imu;
+    std::ofstream fout_imu_rpy;
+
+    // Unified inertial navigator (reader + initializer + ECEF mechanizer)
+    Inertial_Navigator imuNav;
+
+    double prev_rx_time;
+
 private:
     bool save_matfile() const;
 
@@ -170,6 +182,7 @@ public:
     // vector tracking
     std::unique_ptr<Vtl_Data> vtl_data;
     std::unique_ptr<Vtl_Core> vtl_Core;
+    std::unique_ptr<LooseKF> gnss_imu_kf;
     int vtl_epoch;
     bool vtl_output;
 };

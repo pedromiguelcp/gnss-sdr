@@ -59,7 +59,8 @@ Rtklib_Solver::Rtklib_Solver(const rtk_t &rtk,
                              d_flag_dump_enabled(flag_dump_to_file),
                              d_flag_dump_mat_enabled(flag_dump_to_mat),
                              vtl_data(nullptr),
-                             vtl_Core(nullptr)
+                             vtl_Core(nullptr),
+                             gnss_imu_kf(nullptr)
 {
     // see freq index at src/algorithms/libs/rtklib/rtklib_rtkcmn.cc
     // function: satwavelen
@@ -162,6 +163,26 @@ Rtklib_Solver::Rtklib_Solver(const rtk_t &rtk,
             vtl_output = false;
             d_rx_clk_b_idx = (d_conf.vtl_gal_channels > 0) ? 7 : 6;
             d_rx_clk_d_idx = d_rx_clk_b_idx + 1;
+            gnss_imu_kf = std::make_unique<LooseKF>();
+
+            const char *path = "/home/pedro/software/gnss-sdr/Testing/EXP1_07_03_2024_Braga/2024-03-07_11-10-54_RAWIMU.txt";
+            if (fin_raw_imu.is_open())
+                {
+                    fin_raw_imu.close();
+                }
+            fin_raw_imu.clear();
+            fin_raw_imu.open(path);
+
+            const char *path1 = "/home/pedro/software/gnss-sdr/Testing/EXP1_07_03_2024_Braga/2024-03-07_11-10-54_INSPVAS.txt";
+            if (fin_pva_imu.is_open())
+                {
+                    fin_pva_imu.close();
+                }
+            fin_pva_imu.clear();
+            fin_pva_imu.open(path1);
+
+            fout_imu_rpy.open("/home/pedro/software/gnss-sdr/Testing/EXP1_07_03_2024_Braga/rpy.txt");
+            fout_imu_rpy << std::fixed << std::setprecision(6);
         }
 }
 
@@ -201,6 +222,7 @@ Rtklib_Solver::~Rtklib_Solver()
                     LOG(WARNING) << "Exception in destructor saving the PVT .mat dump file " << ex.what();
                 }
         }
+    fout_imu_rpy.close();
 }
 
 
@@ -1621,9 +1643,87 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                         }
                     this->set_rx_pos({rx_position_and_time[0], rx_position_and_time[1], rx_position_and_time[2]});  // save ECEF position for the next iteration
 
+                    /********************  GNSS-INS  ********************/
+                    if ((d_conf.enable_pvt_vtl) && (kf_update_interval_s == 0.02))  // 20ms - observable interval
+                        {
+                            const double rx_time = gnss_observables_map.cbegin()->second.RX_time;
+                            const arma::vec3 GNSS_Pxyz = {pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]};
+                            const arma::vec3 GNSS_Vxyz = {pvt_sol.rr[3], pvt_sol.rr[4], pvt_sol.rr[5]};
+
+                            if (vtl_epoch == 0)
+                                {
+                                    // Initialize (biases + initial attitude RPY) from file up to rx_time (stationary data)
+                                    const double GNSS_Pxyz_llh_init[3] = {41.533371960 * M_PI / 180, -8.485969516 * M_PI / 180, 166.0510};
+                                    double GNSS_Pxyz_xyz_init[3];
+                                    pos2ecef(GNSS_Pxyz_llh_init, GNSS_Pxyz_xyz_init);
+                                    const arma::vec3 GNSS_Pxyz_init = {GNSS_Pxyz_xyz_init[0], GNSS_Pxyz_xyz_init[1], GNSS_Pxyz_xyz_init[2]};
+                                    const arma::vec3 GNSS_Vxyz_init = {0, 0, 0};
+                                    imuNav.initializeMechanizer(fin_raw_imu, fin_pva_imu, rx_time, GNSS_Pxyz_init, GNSS_Vxyz_init);
+                                }
+
+                            // *** Read and Solve IMU
+                            double Tdiff = rx_time - imuNav.obs.imuTime;
+                            while (Tdiff > 0)
+                                {
+                                    // dead reckoning
+                                    imuNav.stepMechanizer(fin_raw_imu);
+
+                                    Tdiff = rx_time - imuNav.obs.imuTime;
+                                    fout_imu_rpy << imuNav.obs.imuTime << ","
+                                                 << imuNav.pos_ant_ecef(0) << ","
+                                                 << imuNav.pos_ant_ecef(1) << ","
+                                                 << imuNav.pos_ant_ecef(2) << ","
+                                                 << imuNav.vel_ant_ecef(0) << ","
+                                                 << imuNav.vel_ant_ecef(1) << ","
+                                                 << imuNav.vel_ant_ecef(2) << ","
+                                                 << imuNav.att_rpy(0) << ","
+                                                 << imuNav.att_rpy(1) << ","
+                                                 << -imuNav.att_rpy(2) << ","
+                                                 << imuNav.ACCbias_b(0) << ","
+                                                 << imuNav.ACCbias_b(1) << ","
+                                                 << imuNav.ACCbias_b(2) << ","
+                                                 << imuNav.GYRbias_b(0) << ","
+                                                 << imuNav.GYRbias_b(1) << ","
+                                                 << imuNav.GYRbias_b(2) << std::endl;
+                                }
+                            imuNav.correctVelRPY(fin_pva_imu, rx_time);
+
+                            // ----- GNSS yaw alignment -----
+                            if (!imuNav.yawAligned())
+                                {
+                                    const double yaw_boresight = 0.0;
+                                    imuNav.alignYawFromGnss(GNSS_Pxyz, GNSS_Vxyz, yaw_boresight);
+                                }
+
+                            vtl_epoch++;
+                        }
+                    if ((d_conf.enable_pvt_vtl) && (vtl_epoch > 1))
+                        {
+                            // Time interval
+                            double _dT = gnss_observables_map.cbegin()->second.RX_time - prev_rx_time;
+                            // Loose Coupling Kalman Filter
+                            gnss_imu_kf->Transition(_dT, imuNav.Ne, imuNav.Fe, imuNav.Ceb);
+                            gnss_imu_kf->ProcessNoiseCoeff(_dT, imuNav.Ceb);
+                            gnss_imu_kf->SetObs(imuNav);
+                            gnss_imu_kf->Filter(imuNav);
+
+                            imuNav.predictIMUECEF();
+
+                            pvt_sol.rr[0] = imuNav.pos_ant_ecef(0);
+                            pvt_sol.rr[1] = imuNav.pos_ant_ecef(1);
+                            pvt_sol.rr[2] = imuNav.pos_ant_ecef(2);
+                            pvt_sol.rr[3] = imuNav.vel_ant_ecef(0);
+                            pvt_sol.rr[4] = imuNav.vel_ant_ecef(1);
+                            pvt_sol.rr[5] = imuNav.vel_ant_ecef(2);
+                            rx_position_and_time[0] = pvt_sol.rr[0];
+                            rx_position_and_time[1] = pvt_sol.rr[1];
+                            rx_position_and_time[2] = pvt_sol.rr[2];
+                            this->set_rx_pos({pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]});
+                        }
+                    prev_rx_time = gnss_observables_map.cbegin()->second.RX_time;
 
                     /********************  VECTOR TRACKING LOOP  ********************/
-                    if ((d_conf.enable_pvt_vtl) && (kf_update_interval_s == 0.02))  // 20ms - observable interval
+                    /*if ((d_conf.enable_pvt_vtl) && (kf_update_interval_s == 0.02))  // 20ms - observable interval
                         {
                             vtl_data->clear_storage();
                             uint8_t ch_id;
@@ -1749,10 +1849,13 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                             pvt_sol.rr[3] = rx_pvt[1];
                             pvt_sol.rr[4] = rx_pvt[3];
                             pvt_sol.rr[5] = rx_pvt[5];
+                            rx_position_and_time[0] = pvt_sol.rr[0];
+                            rx_position_and_time[1] = pvt_sol.rr[1];
+                            rx_position_and_time[2] = pvt_sol.rr[2];
                             rx_position_and_time[3] = rx_pvt[d_rx_clk_b_idx] / SPEED_OF_LIGHT_M_S;
                             pvt_sol.dtr[5] = rx_pvt[d_rx_clk_d_idx];
                             this->set_rx_pos({pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]});
-                        }
+                        }*/
 
                     // compute Ground speed and COG
                     double ground_speed_ms = 0.0;
