@@ -1,11 +1,23 @@
-#pragma once
-/*
- * Inertial_Navigator.h
- * Unified Inertial Navigator class: reading, initialization, and ECEF mechanization
- * Combines ReaderIMU, InitializeIMU, and IMUmechECEF
+/*!
+ * \file inertial_navigator.h
+ * \brief Class that implements an inertial navigation mechanizator
+ * \author Pedro Pereira, 2025. pereirapedrocp@gmail.com
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * GNSS-SDR is a Global Navigation Satellite System software-defined receiver.
+ * This file is part of GNSS-SDR.
+ *
+ * Copyright (C) 2010-2022  (see AUTHORS file for a list of contributors)
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * -----------------------------------------------------------------------------
  */
 
-#include "DCM.h"
+#ifndef GNSS_SDR_INERTIAL_NAVIGATOR_H_
+#define GNSS_SDR_INERTIAL_NAVIGATOR_H_
+
+#include "dcm.h"
 #include <armadillo>
 #include <cmath>
 #include <fstream>
@@ -13,6 +25,12 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+/** \addtogroup PVT
+ * \{ */
+/** \addtogroup PVT_libs
+ * \{ */
+
 
 class Inertial_Navigator
 {
@@ -82,7 +100,7 @@ public:
     arma::vec3 vel_ant_ecef;  // vx,vy,vz (m/s)
     arma::vec3 att_rpy;       // roll,pitch,yaw (rad)
     arma::mat Ceb;            // body->ECEF
-    arma::mat Ne;
+    arma::mat Ne;             // gravity gradient
     arma::mat Fe;
     arma::vec3 Lxyz;  // lever arm (m)
 
@@ -90,12 +108,15 @@ private:
     bool yaw_aligned_ = false;
 
     double normalise(const double value, const double start, const double end);
-    void NormaliseAttitude(arma::vec3& Vec);
     arma::mat SkewMat(const arma::vec3& Vec);
-    arma::mat TensorGravGrad(double X, double Y, double Z);
+    arma::mat GravGrad(const arma::vec3& Vec);
 
     // GNSS velocity EMA in NED for horizontal-only correction
     arma::vec3 v_ned_gnss_filt;
     // Smoothing gains per GNSS epoch
     double ema_alpha = 0.2;
 };
+
+/** \} */
+/** \} */
+#endif  // GNSS_SDR_INERTIAL_NAVIGATOR_H

@@ -163,7 +163,7 @@ Rtklib_Solver::Rtklib_Solver(const rtk_t &rtk,
             vtl_output = false;
             d_rx_clk_b_idx = (d_conf.vtl_gal_channels > 0) ? 7 : 6;
             d_rx_clk_d_idx = d_rx_clk_b_idx + 1;
-            gnss_imu_kf = std::make_unique<LooseKF>();
+            gnss_imu_kf = std::make_unique<Loose_Kf>();
 
             const char *path = "/home/pedro/software/gnss-sdr/Testing/EXP1_07_03_2024_Braga/2024-03-07_11-10-54_RAWIMU.txt";
             if (fin_raw_imu.is_open())
@@ -1653,7 +1653,10 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                             if (vtl_epoch == 0)
                                 {
                                     // Initialize (biases + initial attitude RPY) from file up to rx_time (stationary data)
-                                    const double GNSS_Pxyz_llh_init[3] = {41.533371960 * M_PI / 180, -8.485969516 * M_PI / 180, 166.0510};
+                                    // start
+                                    // const double GNSS_Pxyz_llh_init[3] = {41.533371960 * M_PI / 180, -8.485969516 * M_PI / 180, 166.0510};
+                                    // stop 1
+                                    const double GNSS_Pxyz_llh_init[3] = {41.543364687 * M_PI / 180, -8.439152585 * M_PI / 180, 210.5601};
                                     double GNSS_Pxyz_xyz_init[3];
                                     pos2ecef(GNSS_Pxyz_llh_init, GNSS_Pxyz_xyz_init);
                                     const arma::vec3 GNSS_Pxyz_init = {GNSS_Pxyz_xyz_init[0], GNSS_Pxyz_xyz_init[1], GNSS_Pxyz_xyz_init[2]};

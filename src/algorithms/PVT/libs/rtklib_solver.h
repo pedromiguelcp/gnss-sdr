@@ -35,7 +35,6 @@
 #define GNSS_SDR_RTKLIB_SOLVER_H
 
 
-#include "LooseKF.h"
 #include "beidou_dnav_almanac.h"
 #include "beidou_dnav_ephemeris.h"
 #include "beidou_dnav_iono.h"
@@ -57,6 +56,7 @@
 #include "gps_iono.h"
 #include "gps_utc_model.h"
 #include "inertial_navigator.h"
+#include "loose_kf.h"
 #include "monitor_pvt.h"
 #include "pvt_conf.h"
 #include "pvt_kf.h"
@@ -182,7 +182,7 @@ public:
     // vector tracking
     std::unique_ptr<Vtl_Data> vtl_data;
     std::unique_ptr<Vtl_Core> vtl_Core;
-    std::unique_ptr<LooseKF> gnss_imu_kf;
+    std::unique_ptr<Loose_Kf> gnss_imu_kf;
     int vtl_epoch;
     bool vtl_output;
 };

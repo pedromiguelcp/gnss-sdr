@@ -1,11 +1,20 @@
-/*
- * DCM.cpp
- * Direction Cosine Matrices
- *  Created on: Aug 07, 2018
- *      Author: Aaron Boda
+/*!
+ * \file dcm.cc
+ * \brief Class that implements direction cosine matrices (DMC)
+ * \author Pedro Pereira, 2025. pereirapedrocp@gmail.com
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * GNSS-SDR is a Global Navigation Satellite System software-defined receiver.
+ * This file is part of GNSS-SDR.
+ *
+ * Copyright (C) 2010-2022  (see AUTHORS file for a list of contributors)
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * -----------------------------------------------------------------------------
  */
 
-#include "DCM.h"
+#include "dcm.h"
 #include <armadillo>
 #include <algorithm>
 #include <cmath>
@@ -93,7 +102,7 @@ arma::mat b2eDCM(double lat, double lon, double r, double p, double y)
 arma::vec3 dcm2euler(arma::mat Cbn)
 {
     const double roll = std::atan2(Cbn(1, 2), Cbn(2, 2));
-    const double s = std::clamp(-Cbn(0, 2), -1.0, 1.0);
+    const double s = std::max(-1.0, std::min(1.0, -Cbn(0, 2)));
     const double pitch = std::asin(s);
     const double yaw = std::atan2(Cbn(0, 1), Cbn(0, 0));
     return {roll, pitch, yaw};

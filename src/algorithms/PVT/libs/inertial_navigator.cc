@@ -1,6 +1,17 @@
-/*
- * Inertial_Navigator.cc
- * Unified Inertial Navigator implementation
+/*!
+ * \file inertial_navigator.cc
+ * \brief Class that implements an inertial navigation mechanizator
+ * \author Pedro Pereira, 2025. pereirapedrocp@gmail.com
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * GNSS-SDR is a Global Navigation Satellite System software-defined receiver.
+ * This file is part of GNSS-SDR.
+ *
+ * Copyright (C) 2010-2022  (see AUTHORS file for a list of contributors)
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * -----------------------------------------------------------------------------
  */
 
 #include "inertial_navigator.h"
@@ -162,9 +173,9 @@ void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, std::i
     double roll0 = std::atan2(-acc_mean(1), -acc_mean(2));
     double pitch0 = std::atan2(acc_mean(0), std::sqrt(acc_mean(1) * acc_mean(1) + acc_mean(2) * acc_mean(2)));
     double yaw0 = 0;  // std::atan2(-Gx_sum, Gy_sum);
-    roll0 = 1.9640 * M_PI / 180;
-    pitch0 = -0.1775 * M_PI / 180;
-    yaw0 = -142.7397 * M_PI / 180;
+    // roll0 = 2.1311 * M_PI / 180; // 1.9640 * M_PI / 180;
+    // pitch0 = -1.3099 * M_PI / 180; // -0.1775 * M_PI / 180;
+    // yaw0 = -328.9873 * M_PI / 180; // -142.7397 * M_PI / 180;
 
     // acc bias using gravity
     ecef2pos(pos_ecef.memptr(), pos_llh.memptr());
@@ -203,27 +214,24 @@ void Inertial_Navigator::stepMechanizer(std::ifstream& fin_raw_imu)
     const arma::vec3 om_ei_e = {0.0, 0.0, GNSS_OMEGA_EARTH_DOT};
 
     // subtract biases
-    arma::vec3 sf_bi_b = obs.Acc - ACCbias_b;
-    arma::vec3 om_bi_b = obs.Gyr - GYRbias_b;
+    arma::vec3 sf_b_ib = obs.Acc - ACCbias_b;
+    arma::vec3 om_b_ib = obs.Gyr - GYRbias_b;
 
-    // attitude update (first-order)
-    arma::mat Ceb_updt = Ceb * (arma::eye(3, 3) + (SkewMat(om_bi_b) * dT)) - SkewMat(om_ei_e) * Ceb * dT;
+    // attitude update (first-order) | eq 5.27
+    arma::mat Ceb_updt = Ceb * (arma::eye(3, 3) + (SkewMat(om_b_ib) * dT)) - SkewMat(om_ei_e) * Ceb * dT;
     // keep the DCM orthonormal (Newton–Schulz)
     Ceb_updt = 1.5 * Ceb_updt - 0.5 * Ceb_updt * (Ceb_updt.t() * Ceb_updt);
 
-    // specific force
-    arma::vec3 sf_bi_e = (0.5 * (Ceb + Ceb_updt)) * sf_bi_b;
+    // specific force | eq 5.28
+    arma::vec3 sf_e_ib = (0.5 * (Ceb + Ceb_updt)) * sf_b_ib;
 
-    // gravity
+    // velocity update (with Coriolis) | eq 5.36
     arma::vec3 pos_ecef_mid = pos_ecef + vel_ecef * 0.5 * dT;
     arma::vec3 g_e = Gravity_ECEF(pos_ecef_mid);
-
-
-    // velocity update (with Coriolis)
-    arma::vec3 acc_e = sf_bi_e + g_e - 2 * SkewMat(om_ei_e) * vel_ecef;
+    arma::vec3 acc_e = sf_e_ib + g_e - 2 * SkewMat(om_ei_e) * vel_ecef;
     arma::vec3 vel_ecef_updt = vel_ecef + acc_e * dT;
 
-    // position update
+    // position update | eq 5.38
     arma::vec3 pos_ecef_updt = pos_ecef + (vel_ecef + vel_ecef_updt) * 0.5 * dT;
 
     // RPY update
@@ -231,15 +239,15 @@ void Inertial_Navigator::stepMechanizer(std::ifstream& fin_raw_imu)
     arma::mat Cne = e2llfDCM(pos_llh(0), pos_llh(1));
     arma::mat Cnb = Cne * Ceb_updt;
     arma::vec3 att_rpy_updt = dcm2euler(Cnb.t());
-    NormaliseAttitude(att_rpy_updt);
+    att_rpy_updt(2) = normalise(att_rpy_updt(2), -M_PI, M_PI);
 
     Ceb = Ceb_updt;
     pos_ecef = pos_ecef_updt;
     vel_ecef = vel_ecef_updt;
     att_rpy = att_rpy_updt;
     predictAntennaECEF();
-    Fe = SkewMat(sf_bi_e);
-    Ne = TensorGravGrad(pos_ecef(0), pos_ecef(1), pos_ecef(2));
+    Fe = SkewMat(sf_e_ib);  // derivative of a rotated vector wrt a small rotation is a cross product (skew)
+    Ne = GravGrad(pos_ecef);
 }
 
 
@@ -273,7 +281,7 @@ void Inertial_Navigator::alignYawFromGnss(const arma::vec3& pos_ecef_gnss,
     // yaw from course-over-ground
     const double yaw_course = std::atan2(vE, vN);  // heading from North (rad)
     att_rpy(2) = yaw_course + yaw_boresight_rad;
-    NormaliseAttitude(att_rpy);
+    att_rpy(2) = normalise(att_rpy(2), -M_PI, M_PI);
 
     // update attitude DCM
     ecef2pos(pos_ecef.memptr(), pos_llh.memptr());
@@ -286,10 +294,10 @@ void Inertial_Navigator::alignYawFromGnss(const arma::vec3& pos_ecef_gnss,
 void Inertial_Navigator::predictAntennaECEF()
 {
     const arma::vec3 om_ei_e = {0.0, 0.0, GNSS_OMEGA_EARTH_DOT};
-    arma::vec3 om_bi_b = obs.Gyr - GYRbias_b;
+    arma::vec3 om_b_ib = obs.Gyr - GYRbias_b;
 
     arma::vec3 L_e = Ceb * Lxyz;
-    arma::vec3 L_e_dot = Ceb * arma::cross(om_bi_b, Lxyz) - arma::cross(om_ei_e, L_e);
+    arma::vec3 L_e_dot = Ceb * arma::cross(om_b_ib, Lxyz) - arma::cross(om_ei_e, L_e);
 
     // IMU origin -> Antenna
     pos_ant_ecef = pos_ecef + L_e;
@@ -300,10 +308,10 @@ void Inertial_Navigator::predictAntennaECEF()
 void Inertial_Navigator::predictIMUECEF()
 {
     const arma::vec3 om_ei_e = {0.0, 0.0, GNSS_OMEGA_EARTH_DOT};
-    arma::vec3 om_bi_b = obs.Gyr - GYRbias_b;
+    arma::vec3 om_b_ib = obs.Gyr - GYRbias_b;
 
     arma::vec3 L_e = Ceb * Lxyz;
-    arma::vec3 L_e_dot = Ceb * arma::cross(om_bi_b, Lxyz) - arma::cross(om_ei_e, L_e);
+    arma::vec3 L_e_dot = Ceb * arma::cross(om_b_ib, Lxyz) - arma::cross(om_ei_e, L_e);
 
     // Antenna -> IMU origin
     pos_ecef = pos_ant_ecef - L_e;
@@ -328,42 +336,36 @@ arma::mat Inertial_Navigator::SkewMat(const arma::vec3& Vec)
 // by assuming the range wraps around when going below min or above max
 double Inertial_Navigator::normalise(const double value, const double start, const double end)
 {
-    const double width = end - start;          //
-    const double offsetValue = value - start;  // value relative to 0
+    const double width = end - start;
+    const double offsetValue = value - start;
 
     return (offsetValue - (floor(offsetValue / width) * width)) + start;
-    // + start to reset back to start of original range
-}
-
-// A function to adjust attitude values in state vector to be between 0 to 2PI
-void Inertial_Navigator::NormaliseAttitude(arma::vec3& States)
-{
-    // States(0) = normalise(States(0), -M_PI / 2., M_PI / 2.);
-    // States(1) = normalise(States(1), -M_PI / 2., M_PI / 2.);
-    States(2) = normalise(States(2), -M_PI, M_PI);
 }
 
 
-// Tensor of Gravity Gradients
-arma::mat Inertial_Navigator::TensorGravGrad(double X, double Y, double Z)
+// Numerical Jacobian of gravity (ECEF)
+arma::mat Inertial_Navigator::GravGrad(const arma::vec3& r_e)
 {
-    arma::mat _Ne = arma::zeros(3, 3);
-    // Variables
-    const double R = sqrt(pow(X, 2) + pow(Y, 2) + pow(Z, 2));
-    const double R2 = pow(R, 2);
-    const double R3 = pow(R, 3);
-    const double M = 5.972e24;
-    const double G = 6.674e-11;
-    const double GM_div_R3 = G * M / R3;
-    // Elements of Ne
-    _Ne(0, 0) = GM_div_R3 * ((3 * X * X / R2) - 1) + std::pow(GNSS_OMEGA_EARTH_DOT, 2);
-    _Ne(0, 1) = GM_div_R3 * (3 * X * Y / R2);
-    _Ne(0, 2) = GM_div_R3 * (3 * X * Z / R2);
-    _Ne(1, 0) = GM_div_R3 * (3 * X * Y / R2);
-    _Ne(1, 1) = GM_div_R3 * ((3 * Y * Y / R2) - 1) + std::pow(GNSS_OMEGA_EARTH_DOT, 2);
-    _Ne(1, 2) = GM_div_R3 * (3 * Y * Z / R2);
-    _Ne(2, 0) = GM_div_R3 * (3 * X * Z / R2);
-    _Ne(2, 1) = GM_div_R3 * (3 * Y * Z / R2);
-    _Ne(2, 2) = GM_div_R3 * ((3 * Z * Z / R2) - 1);
+    arma::mat33 _Ne;
+    _Ne.zeros();
+
+    const double h = 1.0;  // meters
+    const arma::vec3 ex{h, 0.0, 0.0};
+    const arma::vec3 ey{0.0, h, 0.0};
+    const arma::vec3 ez{0.0, 0.0, h};
+
+    // Gravity at +/- steps along each axis
+    const arma::vec3 g_xp = Gravity_ECEF(r_e + ex);
+    const arma::vec3 g_xm = Gravity_ECEF(r_e - ex);
+    const arma::vec3 g_yp = Gravity_ECEF(r_e + ey);
+    const arma::vec3 g_ym = Gravity_ECEF(r_e - ey);
+    const arma::vec3 g_zp = Gravity_ECEF(r_e + ez);
+    const arma::vec3 g_zm = Gravity_ECEF(r_e - ez);
+
+    // Columns: dg/dx, dg/dy, dg/dz
+    _Ne.col(0) = (g_xp - g_xm) / (2.0 * h);
+    _Ne.col(1) = (g_yp - g_ym) / (2.0 * h);
+    _Ne.col(2) = (g_zp - g_zm) / (2.0 * h);
+
     return _Ne;
 }

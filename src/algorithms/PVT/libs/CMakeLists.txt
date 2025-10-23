@@ -28,8 +28,8 @@ set(PVT_LIB_SOURCES
     vtl_data.cc
     vtl_core.cc
     inertial_navigator.cc
-    DCM.cc
-    LooseKF.cc
+    dcm.cc
+    loose_kf.cc
 )
 
 set(PVT_LIB_HEADERS
@@ -55,8 +55,8 @@ set(PVT_LIB_HEADERS
     pvt_kf.h
     signal_enabled_flags.h
     inertial_navigator.h
-    DCM.h
-    LooseKF.h
+    dcm.h
+    loose_kf.h
 )
 
 list(SORT PVT_LIB_HEADERS)
