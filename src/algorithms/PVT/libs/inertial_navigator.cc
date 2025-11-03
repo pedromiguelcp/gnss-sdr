@@ -97,16 +97,16 @@ void Inertial_Navigator::readIMUPVA(std::ifstream& fin_pva_imu_file, bool readHe
             obs_pva.pos_llh(0) = pos_lat * M_PI / 180;
             obs_pva.pos_llh(1) = pos_lon * M_PI / 180;
             obs_pva.pos_llh(2) = pos_height;
-            obs_pva.vel_enu(0) = vel_north;
-            obs_pva.vel_enu(1) = vel_east;
-            obs_pva.vel_enu(2) = -vel_up;
+            obs_pva.vel_ned(0) = vel_north;
+            obs_pva.vel_ned(1) = vel_east;
+            obs_pva.vel_ned(2) = -vel_up;
             obs_pva.att_rpy(0) = roll * M_PI / 180;
             obs_pva.att_rpy(1) = pitch * M_PI / 180;
             obs_pva.att_rpy(2) = -yaw * M_PI / 180;
 
             pos2ecef(obs_pva.pos_llh.memptr(), obs_pva.pos_ecef.memptr());
             arma::mat Cne = e2llfDCM(obs_pva.pos_llh(0), obs_pva.pos_llh(1));
-            obs_pva.vel_ecef = Cne.t() * obs_pva.vel_enu;
+            obs_pva.vel_ecef = Cne.t() * obs_pva.vel_ned;
         }
 }
 
@@ -117,15 +117,6 @@ void Inertial_Navigator::correctVelRPY(std::ifstream& fin_pva_imu_file, double E
         {
             readIMUPVA(fin_pva_imu_file, false);
         }
-    // Ceb = b2eDCM(obs_pva.pos_llh(0), obs_pva.pos_llh(1), obs_pva.att_rpy(0), obs_pva.att_rpy(1), obs_pva.att_rpy(2));
-
-    /*arma::mat Cne = e2llfDCM(obs_pva.pos_llh(0) * M_PI / 180, obs_pva.pos_llh(1) * M_PI / 180);
-    arma::vec3 v_ned_imu = Cne * vel_ant_ecef;
-    v_ned_imu(0) = obs_pva.vel_enu(0);
-    v_ned_imu(1) = obs_pva.vel_enu(1);
-    v_ned_imu(2) = obs_pva.vel_enu(2);
-    vel_ant_ecef = Cne.t() * v_ned_imu;  // snap horizontally only
-    predictIMUECEF();*/
 }
 
 
@@ -134,7 +125,6 @@ void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, std::i
 {
     // Lever Arm
     // Lxyz = {0, 0, 0};
-    // Lxyz = {-0.004, 1.184, 1.152};
     Lxyz = {1.184, -0.004, -1.152};  // antenna w.r.t. IMU in body frame
 
     pos_ant_ecef = iniPOS_ecef;
@@ -172,10 +162,7 @@ void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, std::i
     // rough r/p from raw acc
     double roll0 = std::atan2(-acc_mean(1), -acc_mean(2));
     double pitch0 = std::atan2(acc_mean(0), std::sqrt(acc_mean(1) * acc_mean(1) + acc_mean(2) * acc_mean(2)));
-    double yaw0 = 0;  // std::atan2(-Gx_sum, Gy_sum);
-    // roll0 = 2.1311 * M_PI / 180; // 1.9640 * M_PI / 180;
-    // pitch0 = -1.3099 * M_PI / 180; // -0.1775 * M_PI / 180;
-    // yaw0 = -328.9873 * M_PI / 180; // -142.7397 * M_PI / 180;
+    double yaw0 = 0;
 
     // acc bias using gravity
     ecef2pos(pos_ecef.memptr(), pos_llh.memptr());
@@ -240,6 +227,13 @@ void Inertial_Navigator::stepMechanizer(std::ifstream& fin_raw_imu)
     arma::mat Cnb = Cne * Ceb_updt;
     arma::vec3 att_rpy_updt = dcm2euler(Cnb.t());
     att_rpy_updt(2) = normalise(att_rpy_updt(2), -M_PI, M_PI);
+
+    // complementary filter to stabilize roll pitch
+    double lambda = 0.95;
+    double acc_roll = std::atan2(-sf_b_ib(1), -sf_b_ib(2));
+    double acc_pitch = std::atan2(sf_b_ib(0), std::sqrt(sf_b_ib(1) * sf_b_ib(1) + sf_b_ib(2) * sf_b_ib(2)));
+    att_rpy_updt(0) = lambda * att_rpy_updt(0) + (1 - lambda) * acc_roll;
+    att_rpy_updt(1) = lambda * att_rpy_updt(1) + (1 - lambda) * acc_pitch;
 
     Ceb = Ceb_updt;
     pos_ecef = pos_ecef_updt;

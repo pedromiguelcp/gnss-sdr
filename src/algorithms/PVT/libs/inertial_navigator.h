@@ -51,7 +51,7 @@ public:
         double imuPVATime{};
         arma::vec3 pos_llh;  // lat, long, h (deg, deg, m)
         arma::vec3 pos_ecef;
-        arma::vec3 vel_enu;  // v_e, v_n, v_u (m/s)
+        arma::vec3 vel_ned;  // v_n, v_e, v_d (m/s)
         arma::vec3 vel_ecef;
         arma::vec3 att_rpy;  // roll, pitch, yaw (deg)
     };

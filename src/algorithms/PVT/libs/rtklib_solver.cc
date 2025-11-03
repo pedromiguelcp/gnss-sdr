@@ -1644,24 +1644,24 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                     this->set_rx_pos({rx_position_and_time[0], rx_position_and_time[1], rx_position_and_time[2]});  // save ECEF position for the next iteration
 
                     /********************  GNSS-INS  ********************/
-                    if ((d_conf.enable_pvt_vtl) && (kf_update_interval_s == 0.02))  // 20ms - observable interval
+                    const double rx_time = gnss_observables_map.cbegin()->second.RX_time;
+                    const arma::vec3 GNSS_pos_ecef = {pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]};
+                    const arma::vec3 GNSS_vel_ecef = {pvt_sol.rr[3], pvt_sol.rr[4], pvt_sol.rr[5]};
+                    if (d_conf.enable_pvt_vtl)
                         {
-                            const double rx_time = gnss_observables_map.cbegin()->second.RX_time;
-                            const arma::vec3 GNSS_Pxyz = {pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]};
-                            const arma::vec3 GNSS_Vxyz = {pvt_sol.rr[3], pvt_sol.rr[4], pvt_sol.rr[5]};
-
                             if (vtl_epoch == 0)
                                 {
                                     // Initialize (biases + initial attitude RPY) from file up to rx_time (stationary data)
                                     // start
-                                    // const double GNSS_Pxyz_llh_init[3] = {41.533371960 * M_PI / 180, -8.485969516 * M_PI / 180, 166.0510};
+                                    // const double GNSS_pos_llh_init[3] = {41.533371960 * M_PI / 180, -8.485969516 * M_PI / 180, 166.0510};
                                     // stop 1
-                                    const double GNSS_Pxyz_llh_init[3] = {41.543364687 * M_PI / 180, -8.439152585 * M_PI / 180, 210.5601};
-                                    double GNSS_Pxyz_xyz_init[3];
-                                    pos2ecef(GNSS_Pxyz_llh_init, GNSS_Pxyz_xyz_init);
-                                    const arma::vec3 GNSS_Pxyz_init = {GNSS_Pxyz_xyz_init[0], GNSS_Pxyz_xyz_init[1], GNSS_Pxyz_xyz_init[2]};
-                                    const arma::vec3 GNSS_Vxyz_init = {0, 0, 0};
-                                    imuNav.initializeMechanizer(fin_raw_imu, fin_pva_imu, rx_time, GNSS_Pxyz_init, GNSS_Vxyz_init);
+                                    // const double GNSS_pos_llh_init[3] = {41.543364687 * M_PI / 180, -8.439152585 * M_PI / 180, 210.5601};
+
+                                    // double GNSS_pos_ecef_init[3];
+                                    // pos2ecef(GNSS_pos_llh_init, GNSS_pos_ecef_init);
+                                    // const arma::vec3 INS_pos_ecef_init = {GNSS_pos_ecef_init[0], GNSS_pos_ecef_init[1], GNSS_pos_ecef_init[2]};
+                                    // const arma::vec3 INS_vel_ecef_init = {0, 0, 0};
+                                    imuNav.initializeMechanizer(fin_raw_imu, fin_pva_imu, rx_time, GNSS_pos_ecef, GNSS_vel_ecef);
                                 }
 
                             // *** Read and Solve IMU
@@ -1687,7 +1687,19 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                                                  << imuNav.ACCbias_b(2) << ","
                                                  << imuNav.GYRbias_b(0) << ","
                                                  << imuNav.GYRbias_b(1) << ","
-                                                 << imuNav.GYRbias_b(2) << std::endl;
+                                                 << imuNav.GYRbias_b(2) << ","
+                                                 << GNSS_pos_ecef(0) << ","
+                                                 << GNSS_pos_ecef(1) << ","
+                                                 << GNSS_pos_ecef(2) << ","
+                                                 << GNSS_vel_ecef(0) << ","
+                                                 << GNSS_vel_ecef(1) << ","
+                                                 << GNSS_vel_ecef(2) << ","
+                                                 << pvt_sol.qr[0] << ","
+                                                 << pvt_sol.qr[1] << ","
+                                                 << pvt_sol.qr[2] << ","
+                                                 << pvt_sol.qr[3] << ","
+                                                 << pvt_sol.qr[4] << ","
+                                                 << pvt_sol.qr[5] << std::endl;
                                 }
                             imuNav.correctVelRPY(fin_pva_imu, rx_time);
 
@@ -1695,33 +1707,35 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                             if (!imuNav.yawAligned())
                                 {
                                     const double yaw_boresight = 0.0;
-                                    imuNav.alignYawFromGnss(GNSS_Pxyz, GNSS_Vxyz, yaw_boresight);
+                                    imuNav.alignYawFromGnss(GNSS_pos_ecef, GNSS_vel_ecef, yaw_boresight);
+                                }
+
+
+                            if (vtl_epoch > 0)
+                                {
+                                    // Time interval
+                                    double _dT = gnss_observables_map.cbegin()->second.RX_time - prev_rx_time;
+                                    // Loose Coupling Kalman Filter
+                                    gnss_imu_kf->Transition(_dT, imuNav.Ne, imuNav.Fe, imuNav.Ceb);
+                                    gnss_imu_kf->ProcessNoiseCoeff(imuNav.Ceb);
+                                    gnss_imu_kf->SetObs(imuNav, GNSS_pos_ecef, GNSS_vel_ecef, pvt_sol.qr);
+                                    gnss_imu_kf->Filter(imuNav);
+
+                                    imuNav.predictIMUECEF();
+
+                                    pvt_sol.rr[0] = imuNav.pos_ant_ecef(0);
+                                    pvt_sol.rr[1] = imuNav.pos_ant_ecef(1);
+                                    pvt_sol.rr[2] = imuNav.pos_ant_ecef(2);
+                                    pvt_sol.rr[3] = imuNav.vel_ant_ecef(0);
+                                    pvt_sol.rr[4] = imuNav.vel_ant_ecef(1);
+                                    pvt_sol.rr[5] = imuNav.vel_ant_ecef(2);
+                                    rx_position_and_time[0] = pvt_sol.rr[0];
+                                    rx_position_and_time[1] = pvt_sol.rr[1];
+                                    rx_position_and_time[2] = pvt_sol.rr[2];
+                                    this->set_rx_pos({pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]});
                                 }
 
                             vtl_epoch++;
-                        }
-                    if ((d_conf.enable_pvt_vtl) && (vtl_epoch > 1))
-                        {
-                            // Time interval
-                            double _dT = gnss_observables_map.cbegin()->second.RX_time - prev_rx_time;
-                            // Loose Coupling Kalman Filter
-                            gnss_imu_kf->Transition(_dT, imuNav.Ne, imuNav.Fe, imuNav.Ceb);
-                            gnss_imu_kf->ProcessNoiseCoeff(_dT, imuNav.Ceb);
-                            gnss_imu_kf->SetObs(imuNav);
-                            gnss_imu_kf->Filter(imuNav);
-
-                            imuNav.predictIMUECEF();
-
-                            pvt_sol.rr[0] = imuNav.pos_ant_ecef(0);
-                            pvt_sol.rr[1] = imuNav.pos_ant_ecef(1);
-                            pvt_sol.rr[2] = imuNav.pos_ant_ecef(2);
-                            pvt_sol.rr[3] = imuNav.vel_ant_ecef(0);
-                            pvt_sol.rr[4] = imuNav.vel_ant_ecef(1);
-                            pvt_sol.rr[5] = imuNav.vel_ant_ecef(2);
-                            rx_position_and_time[0] = pvt_sol.rr[0];
-                            rx_position_and_time[1] = pvt_sol.rr[1];
-                            rx_position_and_time[2] = pvt_sol.rr[2];
-                            this->set_rx_pos({pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]});
                         }
                     prev_rx_time = gnss_observables_map.cbegin()->second.RX_time;
 

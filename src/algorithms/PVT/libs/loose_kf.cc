@@ -20,20 +20,21 @@
 const double Om = 7.2921155e-5;
 
 // Develop transition matrix
-void Loose_Kf::Transition(double dT, arma::mat Ne, arma::mat Fe, arma::mat Ceb)
+void Loose_Kf::Transition(double rx_dT, arma::mat Ne, arma::mat Fe, arma::mat Ceb)
 {
+    dT = rx_dT;
     _F = arma::zeros(15, 15);
     arma::vec3 Oeie = arma::zeros(3);
     Oeie(2) = Om;
 
     // eq 14.50
-    // --- Derivatives wrt position model ---
+    // Derivatives wrt position model
     // position
     _F.submat(0, 0, 2, 2) = arma::eye(3, 3);
     // velocity
     _F.submat(0, 3, 2, 5) = arma::eye(3, 3) * dT;
 
-    // --- Derivatives wrt velocity model ---
+    // Derivatives wrt velocity model
     // position (maps a position error into a velocity error - gravity changes with position.)
     _F.submat(3, 0, 5, 2) = Ne * dT;
     // velocity
@@ -43,23 +44,23 @@ void Loose_Kf::Transition(double dT, arma::mat Ne, arma::mat Fe, arma::mat Ceb)
     // specific force
     _F.submat(3, 12, 5, 14) = dT * Ceb;
 
-    // --- Derivatives wrt Attitude model ---
+    // Derivatives wrt Attitude model
     // attitude
     _F.submat(6, 6, 8, 8) = arma::eye(3, 3) - dT * SkewMat(Oeie);
     // angular rate
     _F.submat(6, 9, 8, 11) = dT * Ceb;
 
-    // --- Derivatives wrt Angular Rate Model ---
+    // Derivatives wrt Angular Rate Model
     // angular rate
     _F.submat(9, 9, 11, 11) = arma::eye(3, 3);
 
-    // --- Derivatives wrt Specific Force model ---
+    // Derivatives wrt Specific Force model
     // specific force
     _F.submat(12, 12, 14, 14) = arma::eye(3, 3);
 }
 
 // Develop process noise coefficient matrix
-void Loose_Kf::ProcessNoiseCoeff(double dT, arma::mat Ceb)
+void Loose_Kf::ProcessNoiseCoeff(arma::mat Ceb)
 {
     _G.zeros(15, 12);
 
@@ -77,10 +78,10 @@ void Loose_Kf::ProcessNoiseCoeff(double dT, arma::mat Ceb)
 
     // continuous-time noise PSDs
     arma::vec q = {
-        0.002, 0.002, 0.002,  // gyro white
-        0.03, 0.03, 0.03,     // accel white
-        5e-6, 5e-6, 5e-6,     // gyro bias RW
-        2e-4, 2e-4, 2e-4      // accel bias RW
+        4.3633e-4, 4.3633e-4, 4.3633e-4,  // gyro white  (rad/s)/sqrt(Hz)
+        4.9033e-3, 4.9033e-3, 4.9033e-3,  // accel white m/s^2/sqrt(Hz)
+        1.6160e-7, 1.6160e-7, 1.6160e-7,  // gyro-bias RW  (rad/s)/sqrt(s)
+        1.6344e-4, 1.6344e-4, 1.6344e-4   // accel-bias RW m/s^2/sqrt(s)
     };
     arma::mat Qw = arma::diagmat(arma::square(q));
 
@@ -90,20 +91,32 @@ void Loose_Kf::ProcessNoiseCoeff(double dT, arma::mat Ceb)
 
 
 // Sets observation vector of IMU
-void Loose_Kf::SetObs(Inertial_Navigator& imu)
+void Loose_Kf::SetObs(Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz, const arma::vec3& GNSS_Vxyz, const float* qr)
 {
+    // measurement = observed - computed
     _Zobs = arma::zeros(6);
-    _Robs = arma::zeros(6, 6);
-
     for (int i = 0; i < 3; ++i)
         {
-            _Zobs(i) = imu.obs_pva.pos_ecef[i] - imu.pos_ant_ecef(i);
-            _Zobs(i + 3) = imu.obs_pva.vel_ecef[i] - imu.vel_ant_ecef(i);
+            _Zobs(i) = GNSS_Pxyz(i) - imu.pos_ant_ecef(i);      // imu.obs_pva.pos_ecef[i] - imu.pos_ant_ecef(i);
+            _Zobs(i + 3) = GNSS_Vxyz(i) - imu.vel_ant_ecef(i);  // imu.obs_pva.vel_ecef[i] - imu.vel_ant_ecef(i);
         }
 
-    // measurement covariance (small - high trust in iTrace)
-    _Robs.submat(0, 0, 2, 2) = arma::eye(3, 3) * 0.05 * 0.05;  // 5 cm (ECEF)
-    _Robs.submat(3, 3, 5, 5) = arma::eye(3, 3) * 0.05 * 0.05;  // 5 cm/s
+    // measurement covariance
+    _Robs.zeros(6, 6);
+    // position block (ECEF)
+    arma::mat Rpos(3, 3, arma::fill::zeros);
+    Rpos(0, 0) = qr[0];
+    Rpos(1, 1) = qr[1];
+    Rpos(2, 2) = qr[2];
+    Rpos(0, 1) = Rpos(1, 0) = qr[3];
+    Rpos(1, 2) = Rpos(2, 1) = qr[4];
+    Rpos(2, 0) = Rpos(0, 2) = qr[5];
+    _Robs.submat(0, 0, 2, 2) = Rpos;
+    // velocity block (ECEF)
+    _Robs.submat(3, 3, 5, 5) = 0.5 * Rpos;
+
+    // weight from innovation
+    _Robs.diag() += 0.01 * arma::square(_Zobs);
 }
 
 
@@ -114,7 +127,7 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     arma::mat H = arma::zeros(6, 15);
     H.submat(0, 0, 2, 2) = -arma::eye(3, 3);
     H.submat(3, 3, 5, 5) = -arma::eye(3, 3);
-    // position/velocity errors at antenna depen on level arm | eq 14.111
+    // position/velocity errors at antenna depend on level arm | eq 14.111
     arma::vec3 h_r = imu.Ceb * imu.Lxyz;
     arma::vec3 om_b = imu.obs.Gyr - imu.GYRbias_b;
     arma::vec3 h_v = imu.Ceb * arma::cross(om_b, imu.Lxyz);
@@ -132,9 +145,12 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     arma::vec y = _Zobs - H * _Xpre;
 
     // Kalman gain
-    arma::mat S = H * _Ppre * H.t() + _Robs;
-    arma::mat Sinv = arma::inv_sympd(S);
-    arma::mat K = _Ppre * H.t() * Sinv;
+    arma::mat PHt = _Ppre * H.t();
+    arma::mat S = H * PHt + _Robs;
+    // enforce symmetry + tiny diagonal load
+    S = 0.5 * (S + S.t());
+    S.diag() += 1e-12;
+    arma::mat K = arma::solve(S, PHt.t()).t();
 
     // state update
     _Xupd = _Xpre + K * y;
@@ -144,7 +160,6 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     arma::mat IKH = I15 - K * H;
     _Pupd = IKH * _Ppre * IKH.t() + K * _Robs * K.t();
     _Pupd = 0.5 * (_Pupd + _Pupd.t());  // enforce symmetry
-
 
     // Update States
     sol.posXYZ = imu.pos_ant_ecef - _Xupd.subvec(0, 2);
@@ -174,36 +189,24 @@ Loose_Kf::Loose_Kf()
     _Q = arma::zeros(u, u);
     _Ppre = arma::zeros(u, u);
     _Pupd = arma::zeros(u, u);
-    _G = arma::zeros(u, 6);
+    _G = arma::zeros(u, 12);
 
     // State variance
-    // position (m^2), velocity (m/s)^2
-    double qr = std::pow(2, 2);
-    double qv = std::pow(0.2, 2);
-    _Pupd(0, 0) = qr;
-    _Pupd(1, 1) = qr;
-    _Pupd(2, 2) = qr;
-    _Pupd(3, 3) = qv;
-    _Pupd(4, 4) = qv;
-    _Pupd(5, 5) = qv;
-
-    // attitude (rad^2) – allow ~1° initial misalignment
-    double qatt = std::pow(0.017, 2);  // ≈ 1 deg
-    _Pupd(6, 6) = qatt;
-    _Pupd(7, 7) = qatt;
-    _Pupd(8, 8) = qatt;
-
-    // gyro bias (rad/s)^2
-    double qbg = std::pow(0.02, 2);  // ≈ 72 deg/h
-    _Pupd(9, 9) = qbg;
-    _Pupd(10, 10) = qbg;
-    _Pupd(11, 11) = qbg;
-
-    // accel bias (m/s^2)^2 – generous (20 mg)
-    double qba = std::pow(0.2, 2);
-    _Pupd(12, 12) = qba;
-    _Pupd(13, 13) = qba;
-    _Pupd(14, 14) = qba;
+    _Pupd(0, 0) = pow(5, 2);
+    _Pupd(1, 1) = pow(5, 2);
+    _Pupd(2, 2) = pow(7, 2);
+    _Pupd(3, 3) = pow(2, 2);
+    _Pupd(4, 4) = pow(2, 2);
+    _Pupd(5, 5) = pow(3, 2);
+    _Pupd(6, 6) = pow(0.1, 2);
+    _Pupd(7, 7) = pow(0.1, 2);
+    _Pupd(8, 8) = pow(0.1, 2);
+    _Pupd(9, 9) = pow(0.001, 2);
+    _Pupd(10, 10) = pow(0.001, 2);
+    _Pupd(11, 11) = pow(0.001, 2);
+    _Pupd(12, 12) = pow(0.001, 2);
+    _Pupd(13, 13) = pow(0.001, 2);
+    _Pupd(14, 14) = pow(0.001, 2);
 }
 
 Loose_Kf::~Loose_Kf() {}

@@ -53,11 +53,12 @@ public:
     arma::mat _Pupd;             // State Covariance (Updated)
     arma::mat _Zobs;             // IMU Observation Vector
     arma::mat _Robs;             // IMU Observation Variance Matrix
+    double dT;
 
     // Functions
-    void Transition(double dT, arma::mat Ne, arma::mat Fe, arma::mat Ceb);
-    void ProcessNoiseCoeff(double dT, arma::mat Ceb);
-    void SetObs(Inertial_Navigator& IMU_NAV);
+    void Transition(double rx_dT, arma::mat Ne, arma::mat Fe, arma::mat Ceb);
+    void ProcessNoiseCoeff(arma::mat Ceb);
+    void SetObs(Inertial_Navigator& IMU_NAV, const arma::vec3& GNSS_Pxyz, const arma::vec3& GNSS_Vxyz, const float* qr);
     void Filter(Inertial_Navigator& IMU_NAV);
     void clearKF();
 
