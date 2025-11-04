@@ -1,6 +1,6 @@
 /*!
  * \file dcm.h
- * \brief Class that implements direction cosine matrices (DMC)
+ * \brief Class that implements direction cosine matrices (DCM)
  * \author Pedro Pereira, 2025. pereirapedrocp@gmail.com
  *
  * -----------------------------------------------------------------------------
@@ -32,6 +32,7 @@ arma::mat e2llfDCM(double lat, double lon);
 arma::mat b2llfDCM(double roll, double pitch, double yaw);
 arma::mat b2eDCM(double lat, double lon, double r, double p, double y);
 arma::vec3 dcm2euler(arma::mat Cnb);
+arma::mat SkewMat(const arma::vec3& Vec);
 
 
 /** \} */

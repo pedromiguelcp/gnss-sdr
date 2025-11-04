@@ -15,8 +15,12 @@
  */
 
 #include "inertial_navigator.h"
+#include "dcm.h"
 #include "geofunctions.h"
 #include "rtklib_rtkcmn.h"
+#include <algorithm>
+#include <cmath>
+#include <iterator>
 
 
 Inertial_Navigator::Inertial_Navigator()
@@ -142,7 +146,7 @@ void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, std::i
     while ((!fin_raw_imu.eof()) && (obs.imuTime < EndTime))
         {
             readIMU(fin_raw_imu, false);
-            if ((EndTime - obs.imuTime) < 600)
+            if ((EndTime - obs.imuTime) < 30)
                 {
                     Ax_sum += obs.Acc(0);
                     Ay_sum += obs.Acc(1);
@@ -235,6 +239,20 @@ void Inertial_Navigator::stepMechanizer(std::ifstream& fin_raw_imu)
     att_rpy_updt(0) = lambda * att_rpy_updt(0) + (1 - lambda) * acc_roll;
     att_rpy_updt(1) = lambda * att_rpy_updt(1) + (1 - lambda) * acc_pitch;
 
+    // clamp velocity
+    const double vmax_horiz_m_s = 120e3 / 60 / 60;  // 120km/h -> m/s
+    arma::vec3 vel_ned = Cne * vel_ecef_updt;
+    const double sh = std::hypot(vel_ned(0), vel_ned(1));
+    if (sh > vmax_horiz_m_s && sh > 0.0)
+        {
+            const double k = vmax_horiz_m_s / sh;
+            vel_ned(0) *= k;
+            vel_ned(1) *= k;
+        }
+    const double vmax_down_m_s = 2.0;
+    vel_ned(2) = std::max(-vmax_down_m_s, std::min(vel_ned(2), +vmax_down_m_s));
+    vel_ecef_updt = Cne.t() * vel_ned;
+
     Ceb = Ceb_updt;
     pos_ecef = pos_ecef_updt;
     vel_ecef = vel_ecef_updt;
@@ -310,19 +328,6 @@ void Inertial_Navigator::predictIMUECEF()
     // Antenna -> IMU origin
     pos_ecef = pos_ant_ecef - L_e;
     vel_ecef = vel_ant_ecef - L_e_dot;
-}
-
-
-arma::mat Inertial_Navigator::SkewMat(const arma::vec3& Vec)
-{
-    arma::mat Skew = arma::zeros(3, 3);
-    Skew(0, 1) = -Vec(2);
-    Skew(0, 2) = Vec(1);
-    Skew(1, 0) = Vec(2);
-    Skew(1, 2) = -Vec(0);
-    Skew(2, 0) = -Vec(1);
-    Skew(2, 1) = Vec(0);
-    return Skew;
 }
 
 

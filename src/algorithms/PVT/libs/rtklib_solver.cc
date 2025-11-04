@@ -1651,16 +1651,6 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                         {
                             if (vtl_epoch == 0)
                                 {
-                                    // Initialize (biases + initial attitude RPY) from file up to rx_time (stationary data)
-                                    // start
-                                    // const double GNSS_pos_llh_init[3] = {41.533371960 * M_PI / 180, -8.485969516 * M_PI / 180, 166.0510};
-                                    // stop 1
-                                    // const double GNSS_pos_llh_init[3] = {41.543364687 * M_PI / 180, -8.439152585 * M_PI / 180, 210.5601};
-
-                                    // double GNSS_pos_ecef_init[3];
-                                    // pos2ecef(GNSS_pos_llh_init, GNSS_pos_ecef_init);
-                                    // const arma::vec3 INS_pos_ecef_init = {GNSS_pos_ecef_init[0], GNSS_pos_ecef_init[1], GNSS_pos_ecef_init[2]};
-                                    // const arma::vec3 INS_vel_ecef_init = {0, 0, 0};
                                     imuNav.initializeMechanizer(fin_raw_imu, fin_pva_imu, rx_time, GNSS_pos_ecef, GNSS_vel_ecef);
                                 }
 
@@ -1716,8 +1706,8 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                                     // Time interval
                                     double _dT = gnss_observables_map.cbegin()->second.RX_time - prev_rx_time;
                                     // Loose Coupling Kalman Filter
-                                    gnss_imu_kf->Transition(_dT, imuNav.Ne, imuNav.Fe, imuNav.Ceb);
-                                    gnss_imu_kf->ProcessNoiseCoeff(imuNav.Ceb);
+                                    gnss_imu_kf->Transition(_dT, imuNav);
+                                    gnss_imu_kf->ProcessNoiseCoeff(imuNav);
                                     gnss_imu_kf->SetObs(imuNav, GNSS_pos_ecef, GNSS_vel_ecef, pvt_sol.qr);
                                     gnss_imu_kf->Filter(imuNav);
 

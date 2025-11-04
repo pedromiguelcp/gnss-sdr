@@ -15,17 +15,17 @@
  */
 
 #include "loose_kf.h"
+#include "dcm.h"
+#include "rtklib_rtkcmn.h"
 #include "inertial_navigator.h"
 
-const double Om = 7.2921155e-5;
 
 // Develop transition matrix
-void Loose_Kf::Transition(double rx_dT, arma::mat Ne, arma::mat Fe, arma::mat Ceb)
+void Loose_Kf::Transition(double rx_dT, const Inertial_Navigator& imu)
 {
     dT = rx_dT;
     _F = arma::zeros(15, 15);
-    arma::vec3 Oeie = arma::zeros(3);
-    Oeie(2) = Om;
+    const arma::vec3 om_ei_e = {0.0, 0.0, GNSS_OMEGA_EARTH_DOT};
 
     // eq 14.50
     // Derivatives wrt position model
@@ -36,19 +36,19 @@ void Loose_Kf::Transition(double rx_dT, arma::mat Ne, arma::mat Fe, arma::mat Ce
 
     // Derivatives wrt velocity model
     // position (maps a position error into a velocity error - gravity changes with position.)
-    _F.submat(3, 0, 5, 2) = Ne * dT;
+    _F.submat(3, 0, 5, 2) = dT * imu.Ne;
     // velocity
-    _F.submat(3, 3, 5, 5) = arma::eye(3, 3) - 2 * dT * SkewMat(Oeie);
+    _F.submat(3, 3, 5, 5) = arma::eye(3, 3) - 2 * dT * SkewMat(om_ei_e);
     // attitude
-    _F.submat(3, 6, 5, 8) = -dT * Fe;
+    _F.submat(3, 6, 5, 8) = -dT * imu.Fe;
     // specific force
-    _F.submat(3, 12, 5, 14) = dT * Ceb;
+    _F.submat(3, 12, 5, 14) = dT * imu.Ceb;
 
     // Derivatives wrt Attitude model
     // attitude
-    _F.submat(6, 6, 8, 8) = arma::eye(3, 3) - dT * SkewMat(Oeie);
+    _F.submat(6, 6, 8, 8) = arma::eye(3, 3) - dT * SkewMat(om_ei_e);
     // angular rate
-    _F.submat(6, 9, 8, 11) = dT * Ceb;
+    _F.submat(6, 9, 8, 11) = dT * imu.Ceb;
 
     // Derivatives wrt Angular Rate Model
     // angular rate
@@ -60,15 +60,15 @@ void Loose_Kf::Transition(double rx_dT, arma::mat Ne, arma::mat Fe, arma::mat Ce
 }
 
 // Develop process noise coefficient matrix
-void Loose_Kf::ProcessNoiseCoeff(arma::mat Ceb)
+void Loose_Kf::ProcessNoiseCoeff(const Inertial_Navigator& imu)
 {
     _G.zeros(15, 12);
 
     // attitude is driven by gyro noise
-    _G.submat(6, 0, 8, 2) = Ceb;
+    _G.submat(6, 0, 8, 2) = imu.Ceb;
 
     // velocity is driven by accel noise
-    _G.submat(3, 3, 5, 5) = Ceb;
+    _G.submat(3, 3, 5, 5) = imu.Ceb;
 
     // gyro-bias random walk
     _G.submat(9, 6, 11, 8) = arma::eye(3, 3);
@@ -91,15 +91,12 @@ void Loose_Kf::ProcessNoiseCoeff(arma::mat Ceb)
 
 
 // Sets observation vector of IMU
-void Loose_Kf::SetObs(Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz, const arma::vec3& GNSS_Vxyz, const float* qr)
+void Loose_Kf::SetObs(const Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz, const arma::vec3& GNSS_Vxyz, const float* qr)
 {
     // measurement = observed - computed
     _Zobs = arma::zeros(6);
-    for (int i = 0; i < 3; ++i)
-        {
-            _Zobs(i) = GNSS_Pxyz(i) - imu.pos_ant_ecef(i);      // imu.obs_pva.pos_ecef[i] - imu.pos_ant_ecef(i);
-            _Zobs(i + 3) = GNSS_Vxyz(i) - imu.vel_ant_ecef(i);  // imu.obs_pva.vel_ecef[i] - imu.vel_ant_ecef(i);
-        }
+    _Zobs.subvec(0, 2)  = GNSS_Pxyz - imu.pos_ant_ecef; // imu.obs_pva.pos_ecef - imu.pos_ant_ecef;
+    _Zobs.subvec(3, 5)  = GNSS_Vxyz - imu.vel_ant_ecef; // imu.obs_pva.vel_ecef - imu.vel_ant_ecef;
 
     // measurement covariance
     _Robs.zeros(6, 6);
@@ -130,7 +127,8 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     // position/velocity errors at antenna depend on level arm | eq 14.111
     arma::vec3 h_r = imu.Ceb * imu.Lxyz;
     arma::vec3 om_b = imu.obs.Gyr - imu.GYRbias_b;
-    arma::vec3 h_v = imu.Ceb * arma::cross(om_b, imu.Lxyz);
+    const arma::vec3 om_ei_e = {0.0, 0.0, GNSS_OMEGA_EARTH_DOT};
+    arma::vec3 h_v = imu.Ceb * arma::cross(om_b, imu.Lxyz) - arma::cross(om_ei_e, h_r);
     arma::mat H_gyr = imu.Ceb * SkewMat(imu.Lxyz);
     H.submat(0, 6, 2, 8) = SkewMat(h_r);
     H.submat(3, 6, 5, 8) = SkewMat(h_v);
@@ -220,17 +218,4 @@ void Loose_Kf::clearKF()
     _Q.resize(0, 0);
     _Ppre.resize(0, 0);
     _Pupd.resize(0, 0);
-}
-
-// A function to build skew symmetric matrix
-arma::mat Loose_Kf::SkewMat(const arma::vec3& Vec)
-{
-    arma::mat Skew = arma::zeros(3, 3);
-    Skew(0, 1) = -Vec(2);
-    Skew(0, 2) = Vec(1);
-    Skew(1, 0) = Vec(2);
-    Skew(1, 2) = -Vec(0);
-    Skew(2, 0) = -Vec(1);
-    Skew(2, 1) = Vec(0);
-    return Skew;
 }

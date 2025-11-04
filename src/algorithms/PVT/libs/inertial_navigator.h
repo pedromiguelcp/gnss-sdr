@@ -17,14 +17,8 @@
 #ifndef GNSS_SDR_INERTIAL_NAVIGATOR_H_
 #define GNSS_SDR_INERTIAL_NAVIGATOR_H_
 
-#include "dcm.h"
 #include <armadillo>
-#include <cmath>
 #include <fstream>
-#include <iterator>
-#include <sstream>
-#include <string>
-#include <vector>
 
 /** \addtogroup PVT
  * \{ */
@@ -53,7 +47,7 @@ public:
         arma::vec3 pos_ecef;
         arma::vec3 vel_ned;  // v_n, v_e, v_d (m/s)
         arma::vec3 vel_ecef;
-        arma::vec3 att_rpy;  // roll, pitch, yaw (deg)
+        arma::vec3 att_rpy;  // roll, pitch, yaw (rad)
     };
 
     // -------- File reading --------
@@ -108,7 +102,6 @@ private:
     bool yaw_aligned_ = false;
 
     double normalise(const double value, const double start, const double end);
-    arma::mat SkewMat(const arma::vec3& Vec);
     arma::mat GravGrad(const arma::vec3& Vec);
 
     // GNSS velocity EMA in NED for horizontal-only correction

@@ -1,6 +1,6 @@
 /*!
  * \file dcm.cc
- * \brief Class that implements direction cosine matrices (DMC)
+ * \brief Class that implements direction cosine matrices (DCM)
  * \author Pedro Pereira, 2025. pereirapedrocp@gmail.com
  *
  * -----------------------------------------------------------------------------
@@ -106,4 +106,17 @@ arma::vec3 dcm2euler(arma::mat Cbn)
     const double pitch = std::asin(s);
     const double yaw = std::atan2(Cbn(0, 1), Cbn(0, 0));
     return {roll, pitch, yaw};
+}
+
+// skew symmetric matrix
+arma::mat SkewMat(const arma::vec3& Vec)
+{
+    arma::mat Skew = arma::zeros(3, 3);
+    Skew(0, 1) = -Vec(2);
+    Skew(0, 2) = Vec(1);
+    Skew(1, 0) = Vec(2);
+    Skew(1, 2) = -Vec(0);
+    Skew(2, 0) = -Vec(1);
+    Skew(2, 1) = Vec(0);
+    return Skew;
 }
