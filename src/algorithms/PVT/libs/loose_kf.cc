@@ -16,12 +16,12 @@
 
 #include "loose_kf.h"
 #include "dcm.h"
-#include "rtklib_rtkcmn.h"
 #include "inertial_navigator.h"
+#include "rtklib_rtkcmn.h"
 
 
 // Develop transition matrix
-void Loose_Kf::Transition(double rx_dT, const Inertial_Navigator& imu)
+void Loose_Kf::Transition(const double rx_dT, const Inertial_Navigator& imu)
 {
     dT = rx_dT;
     _F = arma::zeros(15, 15);
@@ -95,8 +95,8 @@ void Loose_Kf::SetObs(const Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz
 {
     // measurement = observed - computed
     _Zobs = arma::zeros(6);
-    _Zobs.subvec(0, 2)  = GNSS_Pxyz - imu.pos_ant_ecef; // imu.obs_pva.pos_ecef - imu.pos_ant_ecef;
-    _Zobs.subvec(3, 5)  = GNSS_Vxyz - imu.vel_ant_ecef; // imu.obs_pva.vel_ecef - imu.vel_ant_ecef;
+    _Zobs.subvec(0, 2) = GNSS_Pxyz - imu.pos_ant_ecef;  // imu.obs_pva.pos_ecef - imu.pos_ant_ecef;
+    _Zobs.subvec(3, 5) = GNSS_Vxyz - imu.vel_ant_ecef;  // imu.obs_pva.vel_ecef - imu.vel_ant_ecef;
 
     // measurement covariance
     _Robs.zeros(6, 6);
@@ -117,6 +117,15 @@ void Loose_Kf::SetObs(const Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz
 }
 
 
+void Loose_Kf::PredictOnly()
+{
+    _Xpre = _F * _Xupd;  // _Xupd is 0 in closed-loop
+    _Xupd = _Xpre;       // carry forward
+    _Ppre = _F * _Pupd * _F.t() + _Q;
+    _Pupd = 0.5 * (_Ppre + _Ppre.t());  // keep symmetric
+}
+
+
 // Kalman Filter Algorithm
 void Loose_Kf::Filter(Inertial_Navigator& imu)
 {
@@ -134,45 +143,89 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     H.submat(3, 6, 5, 8) = SkewMat(h_v);
     H.submat(3, 9, 5, 11) = H_gyr;
 
-    // predict
-    _Xupd = arma::zeros(15);  // closed-loop
-    _Xpre = _F * _Xupd;
-    _Ppre = _F * _Pupd * _F.t() + _Q;
+    // block-wise gating (POS and VEL)
+    arma::mat Hpos = H.rows(0, 2);
+    arma::mat Hvel = H.rows(3, 5);
 
-    // innovation (GNSS − INS)
-    arma::vec y = _Zobs - H * _Xpre;
+    arma::vec y_pos = _Zobs.subvec(0, 2) - Hpos * _Xpre;  // innovation blocks
+    arma::vec y_vel = _Zobs.subvec(3, 5) - Hvel * _Xpre;
 
-    // Kalman gain
-    arma::mat PHt = _Ppre * H.t();
-    arma::mat S = H * PHt + _Robs;
-    // enforce symmetry + tiny diagonal load
+    arma::mat Rpos = _Robs.submat(0, 0, 2, 2);
+    arma::mat Rvel = _Robs.submat(3, 3, 5, 5);
+
+    // S = H P H' + R  for each block
+    arma::mat Sp = Hpos * _Ppre * Hpos.t() + Rpos;
+    arma::mat Sv = Hvel * _Ppre * Hvel.t() + Rvel;
+    // keep PD / symmetric
+    Sp = 0.5 * (Sp + Sp.t());
+    Sp.diag() += 1e-12;
+    Sv = 0.5 * (Sv + Sv.t());
+    Sv.diag() += 1e-12;
+
+    // Normalized Innovation Squared (Mahalanobis^2)
+    double nis_pos = arma::as_scalar(y_pos.t() * arma::solve(Sp, y_pos));
+    double nis_vel = arma::as_scalar(y_vel.t() * arma::solve(Sv, y_vel));
+
+    // Gate innovation
+    constexpr double chi2_pos = 7.815;   // 95%
+    constexpr double chi2_vel = 11.345;  // 99%
+    bool pos_ok = (nis_pos < chi2_pos);
+    bool vel_ok = (nis_vel < chi2_vel);
+
+    // Decide which rows to use
+    arma::mat Hr;
+    arma::vec yr;
+    arma::mat Rr;
+    if (pos_ok && vel_ok)
+        {
+            Hr = H;                  // use all 6 rows
+            yr = _Zobs - H * _Xpre;  // full innovation
+            Rr = _Robs;
+        }
+    else if (pos_ok)
+        {
+            Hr = Hpos;  // position-only update
+            yr = y_pos;
+            Rr = Rpos;
+        }
+    else if (vel_ok)
+        {
+            Hr = Hvel;  // velocity-only update
+            yr = y_vel;
+            Rr = Rvel;
+        }
+    else
+        {
+            // both blocks bad -> skip update entirely (no bias injection)
+            _Xupd = _Xpre;
+            _Pupd = _Ppre;
+            return;
+        }
+
+    arma::mat PHt = _Ppre * Hr.t();
+    arma::mat S = Hr * PHt + Rr;
     S = 0.5 * (S + S.t());
     S.diag() += 1e-12;
     arma::mat K = arma::solve(S, PHt.t()).t();
 
-    // state update
-    _Xupd = _Xpre + K * y;
+    _Xupd = _Xpre + K * yr;
 
-    // covariance update (Joseph form)
     arma::mat I15 = arma::eye(15, 15);
-    arma::mat IKH = I15 - K * H;
-    _Pupd = IKH * _Ppre * IKH.t() + K * _Robs * K.t();
-    _Pupd = 0.5 * (_Pupd + _Pupd.t());  // enforce symmetry
+    arma::mat IKH = I15 - K * Hr;
+    _Pupd = IKH * _Ppre * IKH.t() + K * Rr * K.t();
+    _Pupd = 0.5 * (_Pupd + _Pupd.t());
 
-    // Update States
-    sol.posXYZ = imu.pos_ant_ecef - _Xupd.subvec(0, 2);
-    sol.velXYZ = imu.vel_ant_ecef - _Xupd.subvec(3, 5);
-    sol.attXYZ = imu.att_rpy - _Xupd.subvec(6, 8);
-    sol.dw = imu.GYRbias_b + _Xupd.subvec(9, 11);
-    sol.df = imu.ACCbias_b + _Xupd.subvec(12, 14);
-
+    // Update INS states
     imu.pos_ant_ecef -= _Xupd.subvec(0, 2);
     imu.vel_ant_ecef -= _Xupd.subvec(3, 5);
     // imu.att_rpy -= _Xupd.subvec(6, 8);
     arma::vec3 dpsi = _Xupd.subvec(6, 8);
     imu.Ceb = (arma::eye(3, 3) - SkewMat(dpsi)) * imu.Ceb;
+    imu.Ceb = 1.5 * imu.Ceb - 0.5 * imu.Ceb * (imu.Ceb.t() * imu.Ceb);
     imu.GYRbias_b += _Xupd.subvec(9, 11);
     imu.ACCbias_b += _Xupd.subvec(12, 14);
+
+    _Xupd = arma::zeros(15);  // closed-loop
 }
 
 // CONSTRUCTOR AND DESTRUCTOR DEFINITIONS

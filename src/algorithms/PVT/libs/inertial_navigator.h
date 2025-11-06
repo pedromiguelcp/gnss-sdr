@@ -53,12 +53,9 @@ public:
     // -------- File reading --------
     // Reads one epoch from a Septentrio IMU log. If readHeader=true, skips header line.
     void readIMU(std::ifstream& fin_raw_imu_file, bool readHeader);
-    void readIMUPVA(std::ifstream& fin_pva_imu_file, bool readHeader);
-
-    void correctVelRPY(std::ifstream& fin_pva_imu_file, double EndTime);
 
     // -------- ECEF mechanization --------
-    void initializeMechanizer(std::ifstream& fin_raw_imu, std::ifstream& fin_pva_imu, double EndTime, const arma::vec3& iniPOS_ecef,
+    void initializeMechanizer(std::ifstream& fin_raw_imu, double EndTime, const arma::vec3& iniPOS_ecef,
         const arma::vec3& iniVEL_ecef);
 
     // One propagation step (dT seconds)

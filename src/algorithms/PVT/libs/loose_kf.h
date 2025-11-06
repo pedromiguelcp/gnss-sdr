@@ -33,17 +33,6 @@ public:
     // DESTRUCTOR
     ~Loose_Kf();
 
-    struct KFupd
-    {
-        arma::vec3 posXYZ;
-        arma::vec3 velXYZ;
-        arma::vec3 attXYZ;
-        arma::vec3 df;
-        arma::vec3 dw;
-    };
-
-    // Attributes
-    KFupd sol;
     arma::vec::fixed<15> _Xpre;  // Predicted State Vector
     arma::vec::fixed<15> _Xupd;  // Measurement Updated State Vector
     arma::mat _F;                // State Transition Matrix
@@ -51,16 +40,17 @@ public:
     arma::mat _Q;                // Process Noise Covariance
     arma::mat _Ppre;             // State Covariance (Predicted)
     arma::mat _Pupd;             // State Covariance (Updated)
-    arma::vec::fixed<6> _Zobs;             // IMU Observation Vector
+    arma::vec::fixed<6> _Zobs;   // IMU Observation Vector
     arma::mat _Robs;             // IMU Observation Variance Matrix
     double dT;
 
     // Functions
-    void Transition(double rx_dT, const Inertial_Navigator& imu);
+    void Transition(const double rx_dT, const Inertial_Navigator& imu);
     void ProcessNoiseCoeff(const Inertial_Navigator& imu);
     void SetObs(const Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz, const arma::vec3& GNSS_Vxyz, const float* qr);
     void Filter(Inertial_Navigator& imu);
     void clearKF();
+    void PredictOnly();
 };
 
 /** \} */

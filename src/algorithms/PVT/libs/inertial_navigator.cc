@@ -72,59 +72,7 @@ void Inertial_Navigator::readIMU(std::ifstream& fin_raw_imu_file, bool readHeade
 }
 
 
-void Inertial_Navigator::readIMUPVA(std::ifstream& fin_pva_imu_file, bool readHeader)
-{
-    std::string line;
-    if (readHeader)
-        {
-            getline(fin_pva_imu_file, line);
-        }
-
-    getline(fin_pva_imu_file, line);
-    if (!line.empty())
-        {
-            std::istringstream iss(line);
-            std::vector<std::string> words{std::istream_iterator<std::string>{iss}, std::istream_iterator<std::string>{}};
-            obs_pva.imuPVATime = std::stod(words[8]);
-
-            // raw data from file
-            const double pos_lat = std::stod(words[9]);
-            const double pos_lon = std::stod(words[10]);
-            const double pos_height = std::stod(words[11]);
-            const double vel_north = std::stod(words[12]);
-            const double vel_east = std::stod(words[13]);
-            const double vel_up = std::stod(words[14]);
-            const double roll = std::stod(words[15]);
-            const double pitch = std::stod(words[16]);
-            const double yaw = std::stod(words[17]);
-
-            obs_pva.pos_llh(0) = pos_lat * M_PI / 180;
-            obs_pva.pos_llh(1) = pos_lon * M_PI / 180;
-            obs_pva.pos_llh(2) = pos_height;
-            obs_pva.vel_ned(0) = vel_north;
-            obs_pva.vel_ned(1) = vel_east;
-            obs_pva.vel_ned(2) = -vel_up;
-            obs_pva.att_rpy(0) = roll * M_PI / 180;
-            obs_pva.att_rpy(1) = pitch * M_PI / 180;
-            obs_pva.att_rpy(2) = -yaw * M_PI / 180;
-
-            pos2ecef(obs_pva.pos_llh.memptr(), obs_pva.pos_ecef.memptr());
-            arma::mat Cne = e2llfDCM(obs_pva.pos_llh(0), obs_pva.pos_llh(1));
-            obs_pva.vel_ecef = Cne.t() * obs_pva.vel_ned;
-        }
-}
-
-
-void Inertial_Navigator::correctVelRPY(std::ifstream& fin_pva_imu_file, double EndTime)
-{
-    while ((!fin_pva_imu_file.eof()) && (obs_pva.imuPVATime < EndTime))
-        {
-            readIMUPVA(fin_pva_imu_file, false);
-        }
-}
-
-
-void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, std::ifstream& fin_pva_imu, double EndTime, const arma::vec3& iniPOS_ecef,
+void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, double EndTime, const arma::vec3& iniPOS_ecef,
     const arma::vec3& iniVEL_ecef)
 {
     // Lever Arm
@@ -137,7 +85,6 @@ void Inertial_Navigator::initializeMechanizer(std::ifstream& fin_raw_imu, std::i
 
     // read first line (header)
     readIMU(fin_raw_imu, true);
-    readIMUPVA(fin_pva_imu, true);
 
     double Ax_sum = 0, Ay_sum = 0, Az_sum = 0;
     double Gx_sum = 0, Gy_sum = 0, Gz_sum = 0;

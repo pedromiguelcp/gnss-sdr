@@ -134,13 +134,11 @@ public:
 
     // Input File Stream for IMU
     std::ifstream fin_raw_imu;
-    std::ifstream fin_pva_imu;
     std::ofstream fout_imu_rpy;
 
-    // Unified inertial navigator (reader + initializer + ECEF mechanizer)
+    // inertial navigator mechanizer
     Inertial_Navigator imuNav;
-
-    double prev_rx_time;
+    double prev_imu_time;
 
 private:
     bool save_matfile() const;
