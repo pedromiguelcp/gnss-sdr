@@ -135,6 +135,7 @@ public:
     // Input File Stream for IMU
     std::ifstream fin_raw_imu;
     std::ofstream fout_imu_rpy;
+    std::ofstream fout_imu;
 
     // inertial navigator mechanizer
     Inertial_Navigator imuNav;

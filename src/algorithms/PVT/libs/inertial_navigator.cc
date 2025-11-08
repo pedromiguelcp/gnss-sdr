@@ -180,7 +180,7 @@ void Inertial_Navigator::stepMechanizer(std::ifstream& fin_raw_imu)
     att_rpy_updt(2) = normalise(att_rpy_updt(2), -M_PI, M_PI);
 
     // complementary filter to stabilize roll pitch
-    double lambda = 0.95;
+    double lambda = 0.98;
     double acc_roll = std::atan2(-sf_b_ib(1), -sf_b_ib(2));
     double acc_pitch = std::atan2(sf_b_ib(0), std::sqrt(sf_b_ib(1) * sf_b_ib(1) + sf_b_ib(2) * sf_b_ib(2)));
     att_rpy_updt(0) = lambda * att_rpy_updt(0) + (1 - lambda) * acc_roll;

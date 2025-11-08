@@ -38,11 +38,22 @@ public:
     arma::mat _F;                // State Transition Matrix
     arma::mat _G;                // Process Noise Coefficient Matrix
     arma::mat _Q;                // Process Noise Covariance
+    arma::mat S;
     arma::mat _Ppre;             // State Covariance (Predicted)
     arma::mat _Pupd;             // State Covariance (Updated)
     arma::vec::fixed<6> _Zobs;   // IMU Observation Vector
     arma::mat _Robs;             // IMU Observation Variance Matrix
     double dT;
+
+    arma::vec3 nis_pos_i;
+    arma::vec3 nis_vel_i;
+    double nis_pos;
+    double nis_vel;
+    arma::vec3 y_pos;
+    arma::vec3 y_vel;
+    bool pos_ok;
+    bool vel_ok;
+
 
     // Functions
     void Transition(const double rx_dT, const Inertial_Navigator& imu);

@@ -175,6 +175,9 @@ Rtklib_Solver::Rtklib_Solver(const rtk_t &rtk,
 
             fout_imu_rpy.open("/home/pedro/software/gnss-sdr/Testing/EXP1_07_03_2024_Braga/rpy.txt");
             fout_imu_rpy << std::fixed << std::setprecision(6);
+
+            fout_imu.open("/home/pedro/software/gnss-sdr/Testing/EXP1_07_03_2024_Braga/lckf.txt");
+            fout_imu << std::fixed << std::setprecision(6);
         }
 }
 
@@ -215,6 +218,7 @@ Rtklib_Solver::~Rtklib_Solver()
                 }
         }
     fout_imu_rpy.close();
+    fout_imu.close();
 }
 
 
@@ -1685,9 +1689,34 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                             gnss_imu_kf->SetObs(imuNav, GNSS_pos_ecef, GNSS_vel_ecef, pvt_sol.qr);
                             gnss_imu_kf->Filter(imuNav);
 
+                            arma::mat Saux;
+                            Saux = arma::zeros(6, 6);
+                            if (gnss_imu_kf->pos_ok && gnss_imu_kf->vel_ok)
+                                {
+                                    Saux = gnss_imu_kf->S;
+                                }
+                            else if (gnss_imu_kf->pos_ok)
+                                {
+                                    Saux.submat(0, 0, 2, 2) = gnss_imu_kf->S;
+                                }
+                            else if (gnss_imu_kf->vel_ok)
+                                {
+                                    Saux.submat(3, 3, 5, 5) = gnss_imu_kf->S;
+                                }
+
+                            fout_imu << imuNav.obs.imuTime << ","
+                                                 << gnss_imu_kf->y_pos(0) << "," << gnss_imu_kf->y_pos(1) << "," << gnss_imu_kf->y_pos(2) << ","
+                                                 << gnss_imu_kf->y_vel(0) << "," << gnss_imu_kf->y_vel(1) << "," << gnss_imu_kf->y_vel(2) << ","
+                                                 << Saux(0, 0) << "," << Saux(1, 1) << "," << Saux(2, 2) << ","
+                                                 << Saux(3, 3) << "," << Saux(4, 4) << "," << Saux(5, 5) << ","
+                                                 << gnss_imu_kf->nis_pos_i(0) << "," << gnss_imu_kf->nis_pos_i(1) << "," << gnss_imu_kf->nis_pos_i(2) << ","
+                                                 << gnss_imu_kf->nis_vel_i(0) << "," << gnss_imu_kf->nis_vel_i(1) << "," << gnss_imu_kf->nis_vel_i(2) << ","
+                                                 << gnss_imu_kf->nis_pos << "," << gnss_imu_kf->nis_vel << ","
+                                                 << gnss_imu_kf->pos_ok << "," << gnss_imu_kf->vel_ok << std::endl;
+
                             imuNav.predictIMUECEF();
 
-                            pvt_sol.rr[0] = imuNav.pos_ant_ecef(0);
+                            /*pvt_sol.rr[0] = imuNav.pos_ant_ecef(0);
                             pvt_sol.rr[1] = imuNav.pos_ant_ecef(1);
                             pvt_sol.rr[2] = imuNav.pos_ant_ecef(2);
                             pvt_sol.rr[3] = imuNav.vel_ant_ecef(0);
@@ -1696,7 +1725,7 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                             rx_position_and_time[0] = pvt_sol.rr[0];
                             rx_position_and_time[1] = pvt_sol.rr[1];
                             rx_position_and_time[2] = pvt_sol.rr[2];
-                            this->set_rx_pos({pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]});
+                            this->set_rx_pos({pvt_sol.rr[0], pvt_sol.rr[1], pvt_sol.rr[2]});*/
 
                             vtl_epoch++;
                         }

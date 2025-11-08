@@ -110,10 +110,8 @@ void Loose_Kf::SetObs(const Inertial_Navigator& imu, const arma::vec3& GNSS_Pxyz
     Rpos(2, 0) = Rpos(0, 2) = qr[5];
     _Robs.submat(0, 0, 2, 2) = Rpos;
     // velocity block (ECEF)
-    _Robs.submat(3, 3, 5, 5) = 0.5 * Rpos;
-
-    // weight from innovation
-    _Robs.diag() += 0.01 * arma::square(_Zobs);
+    const double svE = 0.2, svN = 0.2, svU = 0.4;      // m/s
+    _Robs.submat(3,3,5,5) = arma::diagmat(arma::vec{svE*svE, svN*svN, svU*svU});
 }
 
 
@@ -147,8 +145,8 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     arma::mat Hpos = H.rows(0, 2);
     arma::mat Hvel = H.rows(3, 5);
 
-    arma::vec y_pos = _Zobs.subvec(0, 2) - Hpos * _Xpre;  // innovation blocks
-    arma::vec y_vel = _Zobs.subvec(3, 5) - Hvel * _Xpre;
+    y_pos = _Zobs.subvec(0, 2) - Hpos * _Xpre;  // innovation blocks
+    y_vel = _Zobs.subvec(3, 5) - Hvel * _Xpre;
 
     arma::mat Rpos = _Robs.submat(0, 0, 2, 2);
     arma::mat Rvel = _Robs.submat(3, 3, 5, 5);
@@ -162,15 +160,49 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
     Sv = 0.5 * (Sv + Sv.t());
     Sv.diag() += 1e-12;
 
+    // --- per-axis robustification (inflate only the bad rows) ---
+    bool r_changed = false;
+
+    // pos rows (k=1, 95% gate)
+    for (int i = 0; i < 3; ++i) {
+        nis_pos_i(i) = y_pos(i) * y_pos(i) / Sp(i,i);
+        if (nis_pos_i(i) > 5.024) {                              // 97.5% for 1 dof
+            double scale = std::min(100.0, nis_pos_i(i) / 5.024);
+            Rpos(i,i) *= scale;
+            r_changed = true;
+        }
+    }
+
+    // vel rows (k=1, 99% gate — looser than pos)
+    for (int i = 0; i < 3; ++i) {
+        nis_vel_i(i) = y_vel(i) * y_vel(i) / Sv(i,i);
+        if (nis_vel_i(i) > 6.635) {                              // 99% for 1 dof
+            double scale = std::min(100.0, nis_vel_i(i) / 6.635);
+            Rvel(i,i) *= scale;
+            r_changed = true;
+        }
+    }
+
+    if (r_changed) {
+        _Robs.submat(0,0,2,2) = Rpos;
+        _Robs.submat(3,3,5,5) = Rvel;
+
+        // recompute Sp/Sv with the inflated rows
+        Sp = Hpos * _Ppre * Hpos.t() + Rpos;
+        Sp = 0.5*(Sp + Sp.t()); Sp.diag() += 1e-12;
+        Sv = Hvel * _Ppre * Hvel.t() + Rvel;
+        Sv = 0.5*(Sv + Sv.t()); Sv.diag() += 1e-12;
+    }
+
     // Normalized Innovation Squared (Mahalanobis^2)
-    double nis_pos = arma::as_scalar(y_pos.t() * arma::solve(Sp, y_pos));
-    double nis_vel = arma::as_scalar(y_vel.t() * arma::solve(Sv, y_vel));
+    nis_pos = arma::as_scalar(y_pos.t() * arma::solve(Sp, y_pos));
+    nis_vel = arma::as_scalar(y_vel.t() * arma::solve(Sv, y_vel));
 
     // Gate innovation
-    constexpr double chi2_pos = 7.815;   // 95%
-    constexpr double chi2_vel = 11.345;  // 99%
-    bool pos_ok = (nis_pos < chi2_pos);
-    bool vel_ok = (nis_vel < chi2_vel);
+    constexpr double chi2_pos = 9.348;   // 97.5%
+    constexpr double chi2_vel = 16.266;  // 99%
+    pos_ok = (nis_pos < chi2_pos);
+    vel_ok = (nis_vel < chi2_vel);
 
     // Decide which rows to use
     arma::mat Hr;
@@ -203,7 +235,7 @@ void Loose_Kf::Filter(Inertial_Navigator& imu)
         }
 
     arma::mat PHt = _Ppre * Hr.t();
-    arma::mat S = Hr * PHt + Rr;
+    S = Hr * PHt + Rr;
     S = 0.5 * (S + S.t());
     S.diag() += 1e-12;
     arma::mat K = arma::solve(S, PHt.t()).t();
@@ -241,6 +273,7 @@ Loose_Kf::Loose_Kf()
     _Ppre = arma::zeros(u, u);
     _Pupd = arma::zeros(u, u);
     _G = arma::zeros(u, 12);
+    S = arma::zeros(6, 6);
 
     // State variance
     _Pupd(0, 0) = pow(5, 2);
