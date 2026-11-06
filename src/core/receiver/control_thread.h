@@ -31,6 +31,7 @@
 #include <pmt/pmt.h>
 #include <array>     // for array
 #include <cstddef>   // for size_t
+#include <cstdint>   // for int32_t
 #include <memory>    // for shared_ptr
 #include <string>    // for string
 #include <thread>    // for std::thread
@@ -139,6 +140,14 @@ private:
      */
     void event_dispatcher(bool &valid_event, pmt::pmt_t &msg);
 
+    void dispatch_command_event(const pmt::pmt_t &msg);
+
+    /*
+     * Control loop of GNSS-SDR.deterministic=true: channel events and
+     * maintenance ticks are handled in sample-stamp order, see DeterministicClock
+     */
+    void run_deterministic_loop();
+
     // Read {ephemeris, iono, utc, ref loc, ref time} assistance from a local XML file previously recorded
     bool read_assistance_from_XML();
 
@@ -223,7 +232,6 @@ private:
     bool stop_;
     bool restart_;
     bool telecommand_enabled_;
-    bool pre_2009_file_;  // to override the system time to postprocess old gnss records and avoid wrong week rollover
 };
 
 

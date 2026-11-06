@@ -8,7 +8,7 @@
  * GNSS-SDR is a Global Navigation Satellite System software-defined receiver.
  * This file is part of GNSS-SDR.
  *
- * Copyright (C) 2010-2020  (see AUTHORS file for a list of contributors)
+ * Copyright (C) 2010-2025  (see AUTHORS file for a list of contributors)
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * -----------------------------------------------------------------------------
@@ -17,24 +17,10 @@
 #ifndef GNSS_SDR_SIGNAL_ENABLED_FLAGS_H
 #define GNSS_SDR_SIGNAL_ENABLED_FLAGS_H
 
+#include "signal_flag.h"
 #include <cstdint>
 
 class ConfigurationInterface;
-
-enum signal_flag : uint32_t
-{
-    GPS_1C = 0x1 << 0,
-    GPS_2S = 0x1 << 1,
-    GPS_L5 = 0x1 << 2,
-    GAL_1B = 0x1 << 3,
-    GAL_E5a = 0x1 << 4,
-    GAL_E5b = 0x1 << 5,
-    GAL_E6 = 0x1 << 6,
-    GLO_1G = 0x1 << 7,
-    GLO_2G = 0x1 << 8,
-    BDS_B1 = 0x1 << 9,
-    BDS_B3 = 0x1 << 10
-};
 
 class Signal_Enabled_Flags
 {
@@ -67,6 +53,18 @@ public:
     }
 
     const uint32_t flags;
+
+    const bool has_gps;
+    const bool has_galileo;
+    const bool has_glonass;
+    const bool has_beidou;
+    const bool has_qzss;
+
+    const bool only_gps;
+    const bool only_galileo;
+    const bool only_glonass;
+    const bool only_beidou;
+    const bool only_qzss;
 };
 
 #endif  // GNSS_SDR_SIGNAL_ENABLED_FLAGS_H

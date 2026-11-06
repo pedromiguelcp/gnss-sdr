@@ -46,6 +46,7 @@ constexpr double FREQ3_BDS = 1.26852e9;   //!<  BeiDou B3 frequency (Hz)
 
 const std::unordered_map<std::string, double> SIGNAL_FREQ_MAP = {
     {"1C", FREQ1},
+    {"1S", FREQ1},
     {"2S", FREQ2},
     {"L5", FREQ5},
     {"1B", FREQ1},
@@ -56,7 +57,11 @@ const std::unordered_map<std::string, double> SIGNAL_FREQ_MAP = {
     {"2G", FREQ2_GLO},
     {"B1", FREQ1_BDS},
     {"B2", FREQ2_BDS},
+    {"5D", FREQ5},
     {"B3", FREQ3_BDS},
+    {"1D", FREQ1},
+    {"J1", FREQ1},
+    {"J5", FREQ5},
 };
 
 

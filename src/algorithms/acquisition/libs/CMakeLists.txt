@@ -5,14 +5,19 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 
-set(ACQUISITION_LIB_HEADERS acq_conf.h)
-set(ACQUISITION_LIB_SOURCES acq_conf.cc)
+set(ACQUISITION_LIB_HEADERS acq_conf.h deterministic_acquisition.h)
+set(ACQUISITION_LIB_SOURCES acq_conf.cc deterministic_acquisition.cc)
 
 if(ENABLE_FPGA)
     set(ACQUISITION_LIB_SOURCES ${ACQUISITION_LIB_SOURCES} acq_conf_fpga.cc)
     set(ACQUISITION_LIB_HEADERS ${ACQUISITION_LIB_HEADERS} acq_conf_fpga.h)
     set(ACQUISITION_LIB_SOURCES ${ACQUISITION_LIB_SOURCES} fpga_acquisition.cc)
     set(ACQUISITION_LIB_HEADERS ${ACQUISITION_LIB_HEADERS} fpga_acquisition.h)
+endif()
+
+if(ENABLE_CUDA)
+    set(ACQUISITION_LIB_SOURCES ${ACQUISITION_LIB_SOURCES} cuda_pcps_engine.cu)
+    set(ACQUISITION_LIB_HEADERS ${ACQUISITION_LIB_HEADERS} cuda_pcps_engine.h)
 endif()
 
 list(SORT ACQUISITION_LIB_HEADERS)
@@ -35,11 +40,12 @@ else()
 endif()
 
 target_link_libraries(acquisition_libs
+    PUBLIC
+        core_system_parameters
     INTERFACE
         Gnuradio::runtime
     PRIVATE
         algorithms_libs
-        core_system_parameters
 )
 
 if(ENABLE_GLOG_AND_GFLAGS)
@@ -68,6 +74,22 @@ if(ENABLE_FPGA)
     target_link_libraries(acquisition_libs
         PRIVATE
             core_libs
+    )
+endif()
+
+if(ENABLE_CUDA)
+    target_include_directories(acquisition_libs
+        PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
+    )
+    target_link_libraries(acquisition_libs
+        PUBLIC
+            CUDA::cudart
+            CUDA::cufft
+    )
+    set_target_properties(acquisition_libs PROPERTIES
+        CUDA_SEPARABLE_COMPILATION OFF
+        POSITION_INDEPENDENT_CODE ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
 endif()
 

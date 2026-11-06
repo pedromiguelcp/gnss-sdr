@@ -15,6 +15,7 @@
  * -----------------------------------------------------------------------------
  */
 
+#include "GPS_L1C.h"
 #include "tracking_discriminators.h"
 #include <gtest/gtest.h>
 #include <cmath>
@@ -58,7 +59,7 @@ TEST(DllNcEMinusLNormalizedTest, Bpsk)
                                     EXPECT_TRUE(err * disc_out >= 0.0);
                                 }
 
-                            if (spacing != 0.5 and err != 0.0)
+                            if (spacing != 0.5 && err != 0.0)
                                 {
                                     double disc_out_old = dll_nc_e_minus_l_normalized(E, L);
 
@@ -92,13 +93,13 @@ TEST(DllNcEMinusLNormalizedTest, SinBoc11)
                             double corr_slope_at_err = -CalculateSlopeAbs(&SinBocCorrelationFunction<1, 1>, spacing + err);
                             double corr_slope_at_neg_err = -CalculateSlopeAbs(&SinBocCorrelationFunction<1, 1>, spacing - err);
 
-                            bool in_linear_region = (std::abs(err) < spacing) and (std::abs(corr_slope_at_err - corr_slope_at_neg_err) < 0.01);
+                            bool in_linear_region = (std::abs(err) < spacing) && (std::abs(corr_slope_at_err - corr_slope_at_neg_err) < 0.01);
                             double norm_factor = (y_intercept - corr_slope * spacing) / spacing;
 
                             if (in_linear_region)
                                 {
                                     EXPECT_NEAR(disc_out, err, 1e-4) << " Spacing: " << spacing << ", slope : " << corr_slope << ", y_intercept: " << y_intercept << ", norm: " << norm_factor << " E: " << E << ", L: " << L;
-                                    if (norm_factor != 0.5 and err != 0.0)
+                                    if (norm_factor != 0.5 && err != 0.0)
                                         {
                                             double disc_out_old = dll_nc_e_minus_l_normalized(E, L);
                                             EXPECT_NE(disc_out_old, err) << " Spacing: " << spacing << ", slope : " << corr_slope << ", y_intercept: " << y_intercept << ", norm: " << norm_factor << " E: " << E << ", L: " << L;
@@ -156,13 +157,13 @@ TEST(DllNcEMinusLNormalizedTest, CosBoc11)
                             double corr_slope_at_err = -CalculateSlopeAbs(&CosBocCorrelationFunction<1, 1>, spacing + err);
                             double corr_slope_at_neg_err = -CalculateSlopeAbs(&CosBocCorrelationFunction<1, 1>, spacing - err);
 
-                            bool in_linear_region = (std::abs(err) < spacing) and (std::abs(corr_slope_at_err - corr_slope_at_neg_err) < 0.01);
+                            bool in_linear_region = (std::abs(err) < spacing) && (std::abs(corr_slope_at_err - corr_slope_at_neg_err) < 0.01);
                             double norm_factor = (y_intercept - corr_slope * spacing) / spacing;
 
                             if (in_linear_region)
                                 {
                                     EXPECT_NEAR(disc_out, err, 1e-4) << " Spacing: " << spacing << ", slope : " << corr_slope << ", y_intercept: " << y_intercept << ", norm: " << norm_factor << " E: " << E << ", L: " << L;
-                                    if (norm_factor != 0.5 and err != 0.0)
+                                    if (norm_factor != 0.5 && err != 0.0)
                                         {
                                             double disc_out_old = dll_nc_e_minus_l_normalized(E, L);
                                             EXPECT_NE(disc_out_old, err) << " Spacing: " << spacing << ", slope : " << corr_slope << ", y_intercept: " << y_intercept << ", norm: " << norm_factor << " E: " << E << ", L: " << L;
@@ -170,5 +171,31 @@ TEST(DllNcEMinusLNormalizedTest, CosBoc11)
                                 }
                         }
                 }
+        }
+}
+
+
+TEST(TmbocVemlpSpacingTest, KnownSpacings)
+{
+    // Unique lock at zero delay
+    EXPECT_TRUE(tmboc_vemlp_spacing_is_valid(0.07, 0.5));
+    EXPECT_TRUE(tmboc_vemlp_spacing_is_valid(0.2, 0.5));
+    // Zero delay is unstable, and the loop locks at about +/-6 m
+    EXPECT_FALSE(tmboc_vemlp_spacing_is_valid(0.15, 0.5));
+    // Additional stable points at about +/-42 m
+    EXPECT_FALSE(tmboc_vemlp_spacing_is_valid(1.0 / 24.0, 0.5));
+    // Stable at zero delay, but with a lower gain than a BOC(1,1) replica
+    EXPECT_FALSE(tmboc_vemlp_spacing_is_valid(0.25, 0.5));
+    // Zero delay is unstable
+    EXPECT_FALSE(tmboc_vemlp_spacing_is_valid(0.25, 0.4));
+}
+
+
+TEST(TmbocVemlpSpacingTest, GpsL1cFallbacks)
+{
+    for (const double very_early_late_space_chips : {0.3, 0.4, 0.5, 0.6, 0.75})
+        {
+            EXPECT_TRUE(tmboc_vemlp_spacing_is_valid(GPS_L1C_TMBOC_EARLY_LATE_SPACE_CHIPS, very_early_late_space_chips)) << "VE/VL: " << very_early_late_space_chips;
+            EXPECT_TRUE(tmboc_vemlp_spacing_is_valid(GPS_L1C_TMBOC_EARLY_LATE_SPACE_NARROW_CHIPS, very_early_late_space_chips)) << "VE/VL: " << very_early_late_space_chips;
         }
 }

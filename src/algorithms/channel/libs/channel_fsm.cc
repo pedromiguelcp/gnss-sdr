@@ -18,6 +18,7 @@
 
 #include "channel_fsm.h"
 #include "channel_event.h"
+#include "deterministic_clock.h"
 #include <utility>
 
 #if USE_GLOG_AND_GFLAGS
@@ -29,7 +30,7 @@
 ChannelFsm::ChannelFsm()
     : queue_(nullptr),
       channel_(0U),
-      state_(0U)
+      state_(FSM_STATE_IDLE)
 {
     acq_ = nullptr;
     trk_ = nullptr;
@@ -40,7 +41,7 @@ ChannelFsm::ChannelFsm(std::shared_ptr<AcquisitionInterface> acquisition)
     : acq_(std::move(acquisition)),
       queue_(nullptr),
       channel_(0U),
-      state_(0U)
+      state_(FSM_STATE_IDLE)
 {
     trk_ = nullptr;
 }
@@ -48,23 +49,26 @@ ChannelFsm::ChannelFsm(std::shared_ptr<AcquisitionInterface> acquisition)
 
 bool ChannelFsm::Event_stop_channel()
 {
-    std::lock_guard<std::mutex> lk(mx_);
+    std::unique_lock<std::mutex> lk(mx_);
+    auto current_state = state_;
+    state_ = FSM_STATE_TERMINATING;
     DLOG(INFO) << "CH = " << channel_ << ". Ev stop channel";
-    switch (state_)
+    lk.unlock();
+    switch (current_state)
         {
-        case 0:  // already in stanby
+        case FSM_STATE_IDLE:
             break;
-        case 1:  // acquisition
-            state_ = 0;
+        case FSM_STATE_ACQUISITION:
             stop_acquisition();
             break;
-        case 2:  // tracking
-            state_ = 0;
+        case FSM_STATE_TRACKING:
             stop_tracking();
             break;
         default:
             break;
         }
+    lk.lock();
+    state_ = FSM_STATE_IDLE;
     return true;
 }
 
@@ -72,11 +76,11 @@ bool ChannelFsm::Event_stop_channel()
 bool ChannelFsm::Event_start_acquisition_fpga()
 {
     std::lock_guard<std::mutex> lk(mx_);
-    if ((state_ == 1) || (state_ == 2))
+    if ((state_ == FSM_STATE_ACQUISITION) || (state_ == FSM_STATE_TRACKING) || (state_ == FSM_STATE_TERMINATING))
         {
             return false;
         }
-    state_ = 1;
+    state_ = FSM_STATE_ACQUISITION;
     DLOG(INFO) << "CH = " << channel_ << ". Ev start acquisition FPGA";
     return true;
 }
@@ -85,11 +89,11 @@ bool ChannelFsm::Event_start_acquisition_fpga()
 bool ChannelFsm::Event_start_acquisition()
 {
     std::lock_guard<std::mutex> lk(mx_);
-    if ((state_ == 1) || (state_ == 2))
+    if ((state_ == FSM_STATE_ACQUISITION) || (state_ == FSM_STATE_TRACKING) || (state_ == FSM_STATE_TERMINATING))
         {
             return false;
         }
-    state_ = 1;
+    state_ = FSM_STATE_ACQUISITION;
     start_acquisition();
     DLOG(INFO) << "CH = " << channel_ << ". Ev start acquisition";
     return true;
@@ -99,11 +103,11 @@ bool ChannelFsm::Event_start_acquisition()
 bool ChannelFsm::Event_valid_acquisition()
 {
     std::lock_guard<std::mutex> lk(mx_);
-    if (state_ != 1)
+    if (state_ != FSM_STATE_ACQUISITION)
         {
             return false;
         }
-    state_ = 2;
+    state_ = FSM_STATE_TRACKING;
     start_tracking();
     DLOG(INFO) << "CH = " << channel_ << ". Ev valid acquisition";
     return true;
@@ -113,11 +117,11 @@ bool ChannelFsm::Event_valid_acquisition()
 bool ChannelFsm::Event_failed_acquisition_repeat()
 {
     std::lock_guard<std::mutex> lk(mx_);
-    if (state_ != 1)
+    if (state_ != FSM_STATE_ACQUISITION)
         {
             return false;
         }
-    state_ = 1;
+    state_ = FSM_STATE_ACQUISITION;
     start_acquisition();
     DLOG(INFO) << "CH = " << channel_ << ". Ev failed acquisition repeat";
     return true;
@@ -127,11 +131,11 @@ bool ChannelFsm::Event_failed_acquisition_repeat()
 bool ChannelFsm::Event_failed_acquisition_no_repeat()
 {
     std::lock_guard<std::mutex> lk(mx_);
-    if (state_ != 1)
+    if (state_ != FSM_STATE_ACQUISITION)
         {
             return false;
         }
-    state_ = 3;
+    state_ = FSM_STATE_FAILED_NO_REPEAT;
     request_satellite();
     DLOG(INFO) << "CH = " << channel_ << ". Ev failed acquisition no repeat";
     return true;
@@ -141,11 +145,11 @@ bool ChannelFsm::Event_failed_acquisition_no_repeat()
 bool ChannelFsm::Event_failed_tracking_standby()
 {
     std::lock_guard<std::mutex> lk(mx_);
-    if (state_ != 2)
+    if (state_ != FSM_STATE_TRACKING)
         {
             return false;
         }
-    state_ = 0U;
+    state_ = FSM_STATE_IDLE;
     notify_stop_tracking();
     DLOG(INFO) << "CH = " << channel_ << ". Ev failed tracking standby";
     return true;
@@ -209,17 +213,17 @@ void ChannelFsm::start_acquisition()
 void ChannelFsm::start_tracking()
 {
     trk_->start_tracking();
-    queue_->push(pmt::make_any(channel_event_make(channel_, 1)));
+    queue_->push(pmt::make_any(channel_event_make(channel_, 1, DeterministicClock::scope_stamp())));
 }
 
 
 void ChannelFsm::request_satellite()
 {
-    queue_->push(pmt::make_any(channel_event_make(channel_, 0)));
+    queue_->push(pmt::make_any(channel_event_make(channel_, 0, DeterministicClock::scope_stamp())));
 }
 
 
 void ChannelFsm::notify_stop_tracking()
 {
-    queue_->push(pmt::make_any(channel_event_make(channel_, 2)));
+    queue_->push(pmt::make_any(channel_event_make(channel_, 2, DeterministicClock::scope_stamp())));
 }

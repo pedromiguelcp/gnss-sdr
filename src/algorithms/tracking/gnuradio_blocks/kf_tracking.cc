@@ -20,6 +20,7 @@
 
 #include "kf_tracking.h"
 #include "Beidou_B1I.h"
+#include "Beidou_B2a.h"
 #include "Beidou_B3I.h"
 #include "GPS_L1_CA.h"
 #include "GPS_L2C.h"
@@ -29,6 +30,7 @@
 #include "Galileo_E5b.h"
 #include "MATH_CONSTANTS.h"
 #include "beidou_b1i_signal_replica.h"
+#include "beidou_b2a_signal_replica.h"
 #include "beidou_b3i_signal_replica.h"
 #include "galileo_e1_signal_replica.h"
 #include "galileo_e5_signal_replica.h"
@@ -41,11 +43,11 @@
 #include "gps_l5_signal_replica.h"
 #include "gps_sdr_signal_replica.h"
 #include "lock_detectors.h"
+#include "matlab_writter_helper.h"
 #include "tracking_discriminators.h"
 #include "trackingcmd.h"
 #include <gnuradio/io_signature.h>   // for io_signature
 #include <gnuradio/thread/thread.h>  // for scoped_lock
-#include <matio.h>                   // for Mat_VarCreate
 #include <pmt/pmt_sugar.h>           // for mp
 #include <volk_gnsssdr/volk_gnsssdr.h>
 #include <algorithm>  // for fill_n
@@ -136,6 +138,9 @@ kf_tracking::kf_tracking(const Kf_Conf &conf_)
       d_dump_mat(d_trk_parameters.dump_mat && d_dump),
       d_acc_carrier_phase_initialized(false)
 {
+    // Inputs needed beyond the progress (GNSS-SDR.deterministic=true): see forecast()
+    d_det.require_span(2 * static_cast<uint64_t>(d_trk_parameters.vector_length));
+
 #if GNURADIO_GREATER_THAN_38
     this->set_relative_rate(1, static_cast<uint64_t>(d_trk_parameters.vector_length));
 #else
@@ -186,6 +191,7 @@ kf_tracking::kf_tracking(const Kf_Conf &conf_)
     map_signal_pretty_name["7X"] = "E5b";
     map_signal_pretty_name["L5"] = "L5";
     map_signal_pretty_name["B1"] = "B1I";
+    map_signal_pretty_name["5D"] = "B2a";
     map_signal_pretty_name["B3"] = "B3I";
 
     d_signal_pretty_name = map_signal_pretty_name[d_signal_type];
@@ -408,6 +414,23 @@ kf_tracking::kf_tracking(const Kf_Conf &conf_)
                     d_data_secondary_code_length = static_cast<uint32_t>(BEIDOU_B1I_SECONDARY_CODE_LENGTH);
                     d_data_secondary_code_string = BEIDOU_B1I_SECONDARY_CODE_STR;
                 }
+            else if (d_signal_type == "5D")
+                {
+                    d_signal_carrier_freq = BEIDOU_B2A_FREQ_HZ;
+                    d_code_period = BEIDOU_B2A_CODE_PERIOD_S;
+                    d_code_chip_rate = BEIDOU_B2A_CODE_RATE_CPS;
+                    d_code_length_chips = static_cast<int32_t>(BEIDOU_B2A_CODE_LENGTH_CHIPS);
+                    d_symbols_per_bit = BEIDOU_B2A_SYMBOLS_PER_BIT;
+                    d_correlation_length_ms = 1;
+                    d_code_samples_per_chip = 1;
+                    d_secondary = false;
+                    d_trk_parameters.track_pilot = false;
+                    d_trk_parameters.slope = 1.0;
+                    d_trk_parameters.spc = d_trk_parameters.early_late_space_chips;
+                    d_trk_parameters.y_intercept = 1.0;
+                    d_secondary_code_length = 0;
+                    d_data_secondary_code_length = 0;
+                }
             else if (d_signal_type == "B3")
                 {
                     // GEO Satellites use different secondary code
@@ -506,7 +529,7 @@ kf_tracking::kf_tracking(const Kf_Conf &conf_)
             d_prompt_data_shift = &d_local_code_shift_chips[1];
         }
 
-    d_multicorrelator_cpu.init(static_cast<int>(2 * d_trk_parameters.vector_length), d_n_correlator_taps);
+    d_multicorrelator_cpu.init(static_cast<int>(2 * d_trk_parameters.vector_length), d_n_correlator_taps, d_trk_parameters.track_pilot);
 
     if (d_trk_parameters.extend_correlation_symbols > 1)
         {
@@ -521,9 +544,6 @@ kf_tracking::kf_tracking(const Kf_Conf &conf_)
     // Enable Data component prompt correlator (slave to Pilot prompt) if tracking uses Pilot signal
     if (d_trk_parameters.track_pilot)
         {
-            // Extra correlator for the data component
-            d_correlator_data_cpu.init(static_cast<int>(2 * d_trk_parameters.vector_length), 1);
-            d_correlator_data_cpu.set_high_dynamics_resampler(d_trk_parameters.high_dyn);
             d_data_code.resize(2 * d_code_length_chips, 0.0);
         }
 
@@ -540,10 +560,12 @@ kf_tracking::kf_tracking(const Kf_Conf &conf_)
     d_Prompt_Data = volk_gnsssdr::vector<gr_complex>(1);
     d_cn0_smoother = Exponential_Smoother();
     d_cn0_smoother.set_alpha(d_trk_parameters.cn0_smoother_alpha);
+    d_cn0_smoother.set_min_value(static_cast<float>(d_trk_parameters.cn0_min));
+    d_cn0_smoother.set_offset(0.0);
 
     if (d_code_period > 0.0)
         {
-            d_cn0_smoother.set_samples_for_initialization(d_trk_parameters.cn0_smoother_samples / static_cast<int>(d_code_period * 1000.0));
+            d_cn0_smoother.set_samples_for_initialization(d_trk_parameters.cn0_smoother_samples / std::max(1, static_cast<int>(d_code_period * 1000.0)));
         }
 
     d_carrier_lock_test_smoother = Exponential_Smoother();
@@ -613,6 +635,15 @@ void kf_tracking::forecast(int noutput_items,
 
 void kf_tracking::msg_handler_telemetry_to_trk(const pmt::pmt_t &msg)
 {
+    {
+        // Telemetry fault stamped with the sample of the offending symbol
+        // (GNSS-SDR.deterministic=true). It takes effect a lookahead later.
+        gr::thread::scoped_lock lock(d_setlock);
+        if (d_det.take_fault(msg, d_sample_counter, d_state != 0, d_channel))
+            {
+                return;
+            }
+    }
     try
         {
             if (pmt::any_ref(msg).type().hash_code() == d_int_type_hash_code)
@@ -622,7 +653,7 @@ void kf_tracking::msg_handler_telemetry_to_trk(const pmt::pmt_t &msg)
                         {
                             DLOG(INFO) << "Telemetry fault received in ch " << this->d_channel;
                             gr::thread::scoped_lock lock(d_setlock);
-                            d_carrier_lock_fail_counter = 200000;  // force loss-of-lock condition
+                            d_force_loss_of_lock = true;
                         }
                 }
         }
@@ -662,6 +693,7 @@ void kf_tracking::start_tracking()
     d_acq_code_phase_samples = d_acquisition_gnss_synchro->Acq_delay_samples;
     d_acq_carrier_doppler_hz = d_acquisition_gnss_synchro->Acq_doppler_hz;
     d_acq_sample_stamp = d_acquisition_gnss_synchro->Acq_samplestamp_samples;
+    d_det.start(d_acq_sample_stamp);  // GNSS-SDR.deterministic=true
 
     d_carrier_doppler_kf_hz = d_acq_carrier_doppler_hz;
     d_carrier_phase_step_rad = TWO_PI * d_carrier_doppler_kf_hz / d_trk_parameters.fs_in;
@@ -673,29 +705,29 @@ void kf_tracking::start_tracking()
     Signal_[1] = d_acquisition_gnss_synchro->Signal[1];
     Signal_[2] = d_acquisition_gnss_synchro->Signal[2];
 
-    if (d_systemName == "GPS" and d_signal_type == "1C")
+    if (d_systemName == "GPS" && d_signal_type == "1C")
         {
             gps_l1_ca_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN, 0);
         }
-    else if (d_systemName == "GPS" and d_signal_type == "2S")
+    else if (d_systemName == "GPS" && d_signal_type == "2S")
         {
             gps_l2c_m_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN);
         }
-    else if (d_systemName == "GPS" and d_signal_type == "L5")
+    else if (d_systemName == "GPS" && d_signal_type == "L5")
         {
             if (d_trk_parameters.track_pilot)
                 {
                     gps_l5q_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN);
                     gps_l5i_code_gen_float(d_data_code, d_acquisition_gnss_synchro->PRN);
                     d_Prompt_Data[0] = gr_complex(0.0, 0.0);
-                    d_correlator_data_cpu.set_local_code_and_taps(d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
+                    d_multicorrelator_cpu.set_data_code_and_prompt_tap(d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
                 }
             else
                 {
                     gps_l5i_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN);
                 }
         }
-    else if (d_systemName == "Galileo" and d_signal_type == "1B")
+    else if (d_systemName == "Galileo" && d_signal_type == "1B")
         {
             if (d_trk_parameters.track_pilot)
                 {
@@ -703,14 +735,14 @@ void kf_tracking::start_tracking()
                     galileo_e1_code_gen_sinboc11_float(d_tracking_code, pilot_signal, d_acquisition_gnss_synchro->PRN);
                     galileo_e1_code_gen_sinboc11_float(d_data_code, Signal_, d_acquisition_gnss_synchro->PRN);
                     d_Prompt_Data[0] = gr_complex(0.0, 0.0);
-                    d_correlator_data_cpu.set_local_code_and_taps(d_code_samples_per_chip * d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
+                    d_multicorrelator_cpu.set_data_code_and_prompt_tap(d_code_samples_per_chip * d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
                 }
             else
                 {
                     galileo_e1_code_gen_sinboc11_float(d_tracking_code, Signal_, d_acquisition_gnss_synchro->PRN);
                 }
         }
-    else if (d_systemName == "Galileo" and d_signal_type == "5X")
+    else if (d_systemName == "Galileo" && d_signal_type == "5X")
         {
             volk_gnsssdr::vector<gr_complex> aux_code(d_code_length_chips);
             const std::array<char, 3> signal_type_ = {{'5', 'X', '\0'}};
@@ -724,7 +756,7 @@ void kf_tracking::start_tracking()
                             d_data_code[i] = aux_code[i].real();  // the same because it is generated the full signal (E5aI + E5aQ)
                         }
                     d_Prompt_Data[0] = gr_complex(0.0, 0.0);
-                    d_correlator_data_cpu.set_local_code_and_taps(d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
+                    d_multicorrelator_cpu.set_data_code_and_prompt_tap(d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
                 }
             else
                 {
@@ -734,7 +766,7 @@ void kf_tracking::start_tracking()
                         }
                 }
         }
-    else if (d_systemName == "Galileo" and d_signal_type == "7X")
+    else if (d_systemName == "Galileo" && d_signal_type == "7X")
         {
             volk_gnsssdr::vector<gr_complex> aux_code(d_code_length_chips);
             const std::array<char, 3> signal_type_ = {{'7', 'X', '\0'}};
@@ -748,7 +780,7 @@ void kf_tracking::start_tracking()
                             d_data_code[i] = aux_code[i].real();  // the same because it is generated the full signal (E5bI + E5bsQ)
                         }
                     d_Prompt_Data[0] = gr_complex(0.0, 0.0);
-                    d_correlator_data_cpu.set_local_code_and_taps(d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
+                    d_multicorrelator_cpu.set_data_code_and_prompt_tap(d_code_length_chips, d_data_code.data(), d_prompt_data_shift);
                 }
             else
                 {
@@ -758,11 +790,11 @@ void kf_tracking::start_tracking()
                         }
                 }
         }
-    else if (d_systemName == "Beidou" and d_signal_type == "B1")
+    else if (d_systemName == "Beidou" && d_signal_type == "B1")
         {
             beidou_b1i_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN, 0);
             // GEO Satellites use different secondary code
-            if (d_acquisition_gnss_synchro->PRN > 0 and d_acquisition_gnss_synchro->PRN < 6)
+            if (d_acquisition_gnss_synchro->PRN > 0 && d_acquisition_gnss_synchro->PRN < 6)
                 {
                     d_symbols_per_bit = BEIDOU_B1I_GEO_TELEMETRY_SYMBOLS_PER_BIT;  // todo: enable after fixing beidou symbol synchronization
                     d_correlation_length_ms = 1;
@@ -791,11 +823,16 @@ void kf_tracking::start_tracking()
                 }
         }
 
-    else if (d_systemName == "Beidou" and d_signal_type == "B3")
+    else if (d_systemName == "Beidou" && d_signal_type == "5D")
+        {
+            beidou_b2a_data_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN, 0);
+        }
+
+    else if (d_systemName == "Beidou" && d_signal_type == "B3")
         {
             beidou_b3i_code_gen_float(d_tracking_code, d_acquisition_gnss_synchro->PRN, 0);
             // Update secondary code settings for geo satellites
-            if (d_acquisition_gnss_synchro->PRN > 0 and d_acquisition_gnss_synchro->PRN < 6)
+            if ((d_acquisition_gnss_synchro->PRN > 0 && d_acquisition_gnss_synchro->PRN < 6) || d_acquisition_gnss_synchro->PRN > 58)
                 {
                     d_symbols_per_bit = BEIDOU_B3I_GEO_TELEMETRY_SYMBOLS_PER_BIT;  // todo: enable after fixing beidou symbol synchronization
                     d_correlation_length_ms = 1;
@@ -829,10 +866,12 @@ void kf_tracking::start_tracking()
 
     d_carrier_lock_fail_counter = 0;
     d_code_lock_fail_counter = 0;
+    d_force_loss_of_lock = false;
     d_rem_code_phase_samples = 0.0;
     d_rem_carr_phase_rad = 0.0;
     d_rem_code_phase_chips = 0.0;
     d_acc_carrier_phase_rad = 0.0;
+    d_carrier_phase_discontinuity = true;  // the carrier phase ambiguity starts again
     d_cn0_estimation_counter = 0;
     d_carrier_lock_test = 1.0;
     d_CN0_SNV_dB_Hz = 0.0;
@@ -995,10 +1034,6 @@ kf_tracking::~kf_tracking()
         }
     try
         {
-            if (d_trk_parameters.track_pilot)
-                {
-                    d_correlator_data_cpu.free();
-                }
             d_multicorrelator_cpu.free();
         }
     catch (const std::exception &ex)
@@ -1064,7 +1099,7 @@ bool kf_tracking::cn0_and_tracking_lock_status(double coh_integration_time_s)
     const float d_CN0_SNV_dB_Hz_raw = cn0_m2m4_estimator(d_Prompt_buffer.data(), d_trk_parameters.cn0_samples, static_cast<float>(coh_integration_time_s));
     d_CN0_SNV_dB_Hz = d_cn0_smoother.smooth(d_CN0_SNV_dB_Hz_raw);
     // Carrier lock indicator
-    d_carrier_lock_test = d_carrier_lock_test_smoother.smooth(carrier_lock_detector(d_Prompt_buffer.data(), 1));
+    d_carrier_lock_test = d_carrier_lock_test_smoother.smooth(carrier_lock_detector(&d_P_accu, 1));
     // Loss of lock detection
     if (!d_pull_in_transitory)
         {
@@ -1092,15 +1127,25 @@ bool kf_tracking::cn0_and_tracking_lock_status(double coh_integration_time_s)
                         }
                 }
         }
-    if (d_carrier_lock_fail_counter > d_trk_parameters.max_carrier_lock_fail or d_code_lock_fail_counter > d_trk_parameters.max_code_lock_fail)
+    if (d_force_loss_of_lock || d_carrier_lock_fail_counter > d_trk_parameters.max_carrier_lock_fail || d_code_lock_fail_counter > d_trk_parameters.max_code_lock_fail)
         {
             std::cout << "Loss of lock in channel " << d_channel << "!\n";
             LOG(INFO) << "Loss of lock in channel " << d_channel
                       << " (carrier_lock_fail_counter:" << d_carrier_lock_fail_counter
-                      << " code_lock_fail_counter : " << d_code_lock_fail_counter << ")";
-            this->message_port_pub(pmt::mp("events"), pmt::from_long(3));  // 3 -> loss of lock
+                      << " code_lock_fail_counter : " << d_code_lock_fail_counter
+                      << (d_force_loss_of_lock ? " forced" : "") << ")";
+            if (d_det.enabled())
+                {
+                    // raised by general_work(), without the lock held
+                    d_det.raise_loss(d_sample_counter);
+                }
+            else
+                {
+                    this->message_port_pub(pmt::mp("events"), pmt::from_long(3));  // 3 -> loss of lock
+                }
             d_carrier_lock_fail_counter = 0;
             d_code_lock_fail_counter = 0;
+            d_force_loss_of_lock = false;
             return false;
         }
     return true;
@@ -1116,20 +1161,21 @@ void kf_tracking::do_correlation_step(const gr_complex *input_samples)
 {
     // ################# CARRIER WIPEOFF AND CORRELATORS ##############################
     // perform carrier wipe-off and compute Early, Prompt and Late correlation
-    d_multicorrelator_cpu.set_input_output_vectors(d_correlator_outs.data(), input_samples);
-    d_multicorrelator_cpu.Carrier_wipeoff_multicorrelator_resampler(
-        d_rem_carr_phase_rad,
-        static_cast<float>(d_carrier_phase_step_rad), static_cast<float>(d_carrier_phase_rate_step_rad),
-        static_cast<float>(d_rem_code_phase_chips) * static_cast<float>(d_code_samples_per_chip),
-        static_cast<float>(d_code_phase_step_chips) * static_cast<float>(d_code_samples_per_chip),
-        static_cast<float>(d_code_phase_rate_step_chips) * static_cast<float>(d_code_samples_per_chip),
-        d_trk_parameters.vector_length);
-
-    // DATA CORRELATOR (if tracking tracks the pilot signal)
     if (d_trk_parameters.track_pilot)
         {
-            d_correlator_data_cpu.set_input_output_vectors(d_Prompt_Data.data(), input_samples);
-            d_correlator_data_cpu.Carrier_wipeoff_multicorrelator_resampler(
+            d_multicorrelator_cpu.set_input_output_vectors(d_correlator_outs.data(), d_Prompt_Data.data(), input_samples);
+            d_multicorrelator_cpu.Carrier_wipeoff_multicorrelator_resampler_with_data_prompt(
+                d_rem_carr_phase_rad,
+                static_cast<float>(d_carrier_phase_step_rad), static_cast<float>(d_carrier_phase_rate_step_rad),
+                static_cast<float>(d_rem_code_phase_chips) * static_cast<float>(d_code_samples_per_chip),
+                static_cast<float>(d_code_phase_step_chips) * static_cast<float>(d_code_samples_per_chip),
+                static_cast<float>(d_code_phase_rate_step_chips) * static_cast<float>(d_code_samples_per_chip),
+                d_trk_parameters.vector_length);
+        }
+    else
+        {
+            d_multicorrelator_cpu.set_input_output_vectors(d_correlator_outs.data(), input_samples);
+            d_multicorrelator_cpu.Carrier_wipeoff_multicorrelator_resampler(
                 d_rem_carr_phase_rad,
                 static_cast<float>(d_carrier_phase_step_rad), static_cast<float>(d_carrier_phase_rate_step_rad),
                 static_cast<float>(d_rem_code_phase_chips) * static_cast<float>(d_code_samples_per_chip),
@@ -1224,6 +1270,7 @@ void kf_tracking::check_carrier_phase_coherent_initialization()
         {
             d_acc_carrier_phase_rad = -d_rem_carr_phase_rad;
             d_acc_carrier_phase_initialized = true;
+            d_carrier_phase_discontinuity = true;  // the carrier phase ambiguity starts again
         }
 }
 
@@ -1493,9 +1540,9 @@ void kf_tracking::log_data()
                     // PRN start sample stamp
                     tmp_long_int = d_sample_counter + static_cast<uint64_t>(d_current_prn_length_samples);
                     d_dump_file.write(reinterpret_cast<char *>(&tmp_long_int), sizeof(uint64_t));
-                    // accumulated carrier phase
-                    tmp_float = static_cast<float>(d_acc_carrier_phase_rad);
-                    d_dump_file.write(reinterpret_cast<char *>(&tmp_float), sizeof(float));
+                    // accumulated carrier phase (double, since it grows without bound)
+                    tmp_double = d_acc_carrier_phase_rad;
+                    d_dump_file.write(reinterpret_cast<char *>(&tmp_double), sizeof(double));
                     // carrier and code frequency
                     tmp_float = static_cast<float>(d_carrier_doppler_kf_hz);
                     d_dump_file.write(reinterpret_cast<char *>(&tmp_float), sizeof(float));
@@ -1543,8 +1590,8 @@ int32_t kf_tracking::save_matfile() const
 {
     // READ DUMP FILE
     std::ifstream::pos_type size;
-    const int32_t number_of_double_vars = 1;
-    const int32_t number_of_float_vars = 19;
+    const int32_t number_of_double_vars = 2;
+    const int32_t number_of_float_vars = 18;
     const int32_t epoch_size_bytes = sizeof(uint64_t) + sizeof(double) * number_of_double_vars +
                                      sizeof(float) * number_of_float_vars + sizeof(uint32_t);
     std::ifstream dump_file;
@@ -1584,7 +1631,7 @@ int32_t kf_tracking::save_matfile() const
     auto Prompt_I = std::vector<float>(num_epoch);
     auto Prompt_Q = std::vector<float>(num_epoch);
     auto PRN_start_sample_count = std::vector<uint64_t>(num_epoch);
-    auto acc_carrier_phase_rad = std::vector<float>(num_epoch);
+    auto acc_carrier_phase_rad = std::vector<double>(num_epoch);
     auto carrier_doppler_hz = std::vector<float>(num_epoch);
     auto carrier_doppler_rate_hz = std::vector<float>(num_epoch);
     auto code_freq_chips = std::vector<float>(num_epoch);
@@ -1612,7 +1659,7 @@ int32_t kf_tracking::save_matfile() const
                             dump_file.read(reinterpret_cast<char *>(&Prompt_I[i]), sizeof(float));
                             dump_file.read(reinterpret_cast<char *>(&Prompt_Q[i]), sizeof(float));
                             dump_file.read(reinterpret_cast<char *>(&PRN_start_sample_count[i]), sizeof(uint64_t));
-                            dump_file.read(reinterpret_cast<char *>(&acc_carrier_phase_rad[i]), sizeof(float));
+                            dump_file.read(reinterpret_cast<char *>(&acc_carrier_phase_rad[i]), sizeof(double));
                             dump_file.read(reinterpret_cast<char *>(&carrier_doppler_hz[i]), sizeof(float));
                             dump_file.read(reinterpret_cast<char *>(&carrier_doppler_rate_hz[i]), sizeof(float));
                             dump_file.read(reinterpret_cast<char *>(&code_freq_chips[i]), sizeof(float));
@@ -1638,7 +1685,6 @@ int32_t kf_tracking::save_matfile() const
 
     // WRITE MAT FILE
     mat_t *matfp;
-    matvar_t *matvar;
     std::string filename = std::move(dump_filename_);
     filename.erase(filename.length() - 4, 4);
     filename.append(".mat");
@@ -1646,93 +1692,28 @@ int32_t kf_tracking::save_matfile() const
     if (reinterpret_cast<int64_t *>(matfp) != nullptr)
         {
             std::array<size_t, 2> dims{1, static_cast<size_t>(num_epoch)};
-            matvar = Mat_VarCreate("abs_VE", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), abs_VE.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("abs_E", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), abs_E.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("abs_P", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), abs_P.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("abs_L", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), abs_L.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("abs_VL", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), abs_VL.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("Prompt_I", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), Prompt_I.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("Prompt_Q", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), Prompt_Q.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("PRN_start_sample_count", MAT_C_UINT64, MAT_T_UINT64, 2, dims.data(), PRN_start_sample_count.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("acc_carrier_phase_rad", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), acc_carrier_phase_rad.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("carrier_doppler_hz", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), carrier_doppler_hz.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("carrier_doppler_rate_hz", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), carrier_doppler_rate_hz.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("code_freq_chips", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), code_freq_chips.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("code_freq_rate_chips", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), code_freq_rate_chips.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("carr_error_hz", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), carr_error_hz.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("carr_error_filt_hz", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), carr_error_filt_hz.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("code_error_chips", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), code_error_chips.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("code_error_filt_chips", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), code_error_filt_chips.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("CN0_SNV_dB_Hz", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), CN0_SNV_dB_Hz.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("carrier_lock_test", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), carrier_lock_test.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("aux1", MAT_C_SINGLE, MAT_T_SINGLE, 2, dims.data(), aux1.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("aux2", MAT_C_DOUBLE, MAT_T_DOUBLE, 2, dims.data(), aux2.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
-
-            matvar = Mat_VarCreate("PRN", MAT_C_UINT32, MAT_T_UINT32, 2, dims.data(), PRN.data(), 0);
-            Mat_VarWrite(matfp, matvar, MAT_COMPRESSION_ZLIB);  // or MAT_COMPRESSION_NONE
-            Mat_VarFree(matvar);
+            write_matlab_var<2, float>("abs_VE", abs_VE.data(), matfp, dims);
+            write_matlab_var<2, float>("abs_E", abs_E.data(), matfp, dims);
+            write_matlab_var<2, float>("abs_P", abs_P.data(), matfp, dims);
+            write_matlab_var<2, float>("abs_L", abs_L.data(), matfp, dims);
+            write_matlab_var<2, float>("abs_VL", abs_VL.data(), matfp, dims);
+            write_matlab_var<2, float>("Prompt_I", Prompt_I.data(), matfp, dims);
+            write_matlab_var<2, float>("Prompt_Q", Prompt_Q.data(), matfp, dims);
+            write_matlab_var<2, uint64_t>("PRN_start_sample_count", PRN_start_sample_count.data(), matfp, dims);
+            write_matlab_var<2, double>("acc_carrier_phase_rad", acc_carrier_phase_rad.data(), matfp, dims);
+            write_matlab_var<2, float>("carrier_doppler_hz", carrier_doppler_hz.data(), matfp, dims);
+            write_matlab_var<2, float>("carrier_doppler_rate_hz", carrier_doppler_rate_hz.data(), matfp, dims);
+            write_matlab_var<2, float>("code_freq_chips", code_freq_chips.data(), matfp, dims);
+            write_matlab_var<2, float>("code_freq_rate_chips", code_freq_rate_chips.data(), matfp, dims);
+            write_matlab_var<2, float>("carr_error_hz", carr_error_hz.data(), matfp, dims);
+            write_matlab_var<2, float>("carr_error_filt_hz", carr_error_filt_hz.data(), matfp, dims);
+            write_matlab_var<2, float>("code_error_chips", code_error_chips.data(), matfp, dims);
+            write_matlab_var<2, float>("code_error_filt_chips", code_error_filt_chips.data(), matfp, dims);
+            write_matlab_var<2, float>("CN0_SNV_dB_Hz", CN0_SNV_dB_Hz.data(), matfp, dims);
+            write_matlab_var<2, float>("carrier_lock_test", carrier_lock_test.data(), matfp, dims);
+            write_matlab_var<2, float>("aux1", aux1.data(), matfp, dims);
+            write_matlab_var<2, double>("aux2", aux2.data(), matfp, dims);
+            write_matlab_var<2, uint32_t>("PRN", PRN.data(), matfp, dims);
         }
     Mat_Close(matfp);
     return 0;
@@ -1784,7 +1765,21 @@ void kf_tracking::stop_tracking()
 }
 
 
-int kf_tracking::general_work(int noutput_items __attribute__((unused)), gr_vector_int &ninput_items,
+int kf_tracking::general_work(int noutput_items, gr_vector_int &ninput_items,
+    gr_vector_const_void_star &input_items, gr_vector_void_star &output_items)
+{
+    const int produced = process_input(noutput_items, ninput_items, input_items, output_items);
+    if (d_det.enabled())
+        {
+            // The event reaches the control queue before the progress passes its stamp
+            d_det.dispatch(d_channel, [this](int event) { this->message_port_pub(pmt::mp("events"), pmt::from_long(event)); });
+            d_det.publish(d_sample_counter);
+        }
+    return produced;
+}
+
+
+int kf_tracking::process_input(int noutput_items __attribute__((unused)), gr_vector_int &ninput_items,
     gr_vector_const_void_star &input_items, gr_vector_void_star &output_items)
 {
     gr::thread::scoped_lock l(d_setlock);
@@ -1792,6 +1787,12 @@ int kf_tracking::general_work(int noutput_items __attribute__((unused)), gr_vect
     auto **out = reinterpret_cast<Gnss_Synchro **>(&output_items[0]);
     Gnss_Synchro current_synchro_data = Gnss_Synchro();
     current_synchro_data.Flag_valid_symbol_output = false;
+
+    if (d_det.fault_due(d_sample_counter, d_channel) && d_state != 0)
+        {
+            DLOG(INFO) << "Telemetry fault applied in ch " << this->d_channel;
+            d_force_loss_of_lock = true;
+        }
 
     if (d_pull_in_transitory == true)
         {
@@ -1813,6 +1814,15 @@ int kf_tracking::general_work(int noutput_items __attribute__((unused)), gr_vect
             }
         case 1:  // Pull-in
             {
+                const uint64_t det_skip = d_det.samples_to_pull_in(d_sample_counter, d_channel);
+                if (det_skip > 0)
+                    {
+                        // GNSS-SDR.deterministic=true: pull in at the stamped sample
+                        const auto n_consume = static_cast<int>(std::min<uint64_t>(det_skip, static_cast<uint64_t>(ninput_items[0])));
+                        d_sample_counter += static_cast<uint64_t>(n_consume);
+                        consume_each(n_consume);
+                        return 0;
+                    }
                 // Signal alignment (skip samples until the incoming signal is aligned with local replica)
                 const int64_t acq_trk_diff_samples = static_cast<int64_t>(d_sample_counter) - static_cast<int64_t>(d_acq_sample_stamp);
                 const double acq_trk_diff_seconds = static_cast<double>(acq_trk_diff_samples) / d_trk_parameters.fs_in;
@@ -1866,7 +1876,7 @@ int kf_tracking::general_work(int noutput_items __attribute__((unused)), gr_vect
                 // fail-safe: check if the secondary code or bit synchronization has not succeeded in a limited time period
                 if (d_trk_parameters.bit_synchronization_time_limit_s < (d_sample_counter - d_acq_sample_stamp) / static_cast<int>(d_trk_parameters.fs_in))
                     {
-                        d_carrier_lock_fail_counter = 300000;  // force loss-of-lock condition
+                        d_force_loss_of_lock = true;
                         LOG(INFO) << d_systemName << " " << d_signal_pretty_name << " tracking synchronization time limit reached in channel " << d_channel
                                   << " for satellite " << Gnss_Satellite(d_systemName, d_acquisition_gnss_synchro->PRN) << '\n';
                     }
@@ -1946,6 +1956,10 @@ int kf_tracking::general_work(int noutput_items __attribute__((unused)), gr_vect
                                         // UPDATE INTEGRATION TIME
                                         d_extend_correlation_symbols_count = 0;
                                         d_current_correlation_time_s = static_cast<float>(d_trk_parameters.extend_correlation_symbols) * static_cast<float>(d_code_period);
+                                        // the CN0 estimation buffer must not mix prompts from different integration times
+                                        d_cn0_estimation_counter = 0;
+                                        // keep the smoother initialization at the same data-time budget under the new update period
+                                        d_cn0_smoother.set_samples_for_initialization(d_trk_parameters.cn0_smoother_samples / std::max(1, static_cast<int>(d_current_correlation_time_s * 1000.0)));
                                         d_state = 3;  // next state is the extended correlator integrator
                                         LOG(INFO) << "Enabled " << d_trk_parameters.extend_correlation_symbols * static_cast<int32_t>(d_code_period * 1000.0) << " ms extended correlator in channel "
                                                   << d_channel
@@ -2085,6 +2099,11 @@ int kf_tracking::general_work(int noutput_items __attribute__((unused)), gr_vect
         {
             current_synchro_data.fs = static_cast<int64_t>(d_trk_parameters.fs_in);
             current_synchro_data.Tracking_sample_counter = d_sample_counter;
+            // report a restarted carrier phase accumulator on the first valid
+            // output that carries it
+            current_synchro_data.Flag_carrier_phase_continuous = !d_carrier_phase_discontinuity;
+            d_carrier_phase_discontinuity = false;
+            d_det.record_output(this->nitems_written(0), current_synchro_data.Tracking_sample_counter);
             *out[0] = std::move(current_synchro_data);
             return 1;
         }
