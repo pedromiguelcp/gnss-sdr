@@ -17,10 +17,12 @@ set(CORE_LIBS_SOURCES
     gnss_crypto.cc
     gnss_sdr_sample_counter.cc
     gnss_sdr_supl_client.cc
+    horizon_gate.cc
     ini.cc
     INIReader.cc
     nav_message_monitor.cc
     nav_message_udp_sink.cc
+    osnma_crypto_material.cc
     osnma_helper.cc
     osnma_msg_receiver.cc
     osnma_nav_data_manager.cc
@@ -35,14 +37,17 @@ set(CORE_LIBS_HEADERS
     gnss_crypto.h
     gnss_sdr_sample_counter.h
     gnss_sdr_supl_client.h
+    horizon_gate.h
     ini.h
     INIReader.h
     nav_message_monitor.h
     nav_message_packet.h
     nav_message_udp_sink.h
+    osnma_crypto_material.h
     osnma_helper.h
     osnma_msg_receiver.h
     osnma_nav_data_manager.h
+    protobuf_cleanup_manager.h
     serdes_nav_message.h
     string_converter.h
 )
@@ -106,6 +111,14 @@ target_link_libraries(core_libs
         Pugixml::pugixml
 )
 
+# buffer_reader moved out of buffer.h in newer GNU Radio releases.
+find_path(GNURADIO_BUFFER_READER_INCLUDE_DIR gnuradio/buffer_reader.h
+    HINTS ${GNURADIO_RUNTIME_INCLUDE_DIRS}
+)
+if(GNURADIO_BUFFER_READER_INCLUDE_DIR)
+    target_compile_definitions(core_libs PRIVATE GNURADIO_HAS_BUFFER_READER_H=1)
+endif()
+
 if(ENABLE_GLOG_AND_GFLAGS)
     target_link_libraries(core_libs PRIVATE Gflags::gflags Glog::glog)
     target_compile_definitions(core_libs PRIVATE -DUSE_GLOG_AND_GFLAGS=1)
@@ -132,7 +145,11 @@ target_include_directories(core_libs
 
 # links to the appropriate library and defines
 # USE_GNUTLS_FALLBACK, USE_OPENSSL_3, or USE_OPENSSL_111 accordingly.
-link_to_crypto_dependencies(core_libs)
+# PUBLIC scope (the default) is required here: the public header
+# gnss_crypto.h includes the backend headers and switches the class
+# definition on those macros, so every consumer must see the same
+# defines and include directories.
+link_to_crypto_dependencies(core_libs PUBLIC)
 
 if(USE_GENERIC_LAMBDAS)
     set(has_generic_lambdas HAS_GENERIC_LAMBDA=1)
@@ -199,3 +216,27 @@ set_property(TARGET core_libs
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${GNSSSDR_SOURCE_DIR}/src/core/interfaces>
 )
+
+# Keep the file sink independent of receiver and signal-processing dependencies.
+# Older toolchains using glog do not build this C++17-only target.
+if(NOT ENABLE_GLOG_AND_GFLAGS)
+    add_library(gnss_sdr_log_sink STATIC gnss_sdr_log_sink.cc gnss_sdr_log_sink.h)
+    target_compile_features(gnss_sdr_log_sink PUBLIC cxx_std_17)
+    target_include_directories(gnss_sdr_log_sink
+        PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+        PRIVATE ${GNSSSDR_SOURCE_DIR}/src/algorithms/libs
+    )
+    target_link_libraries(gnss_sdr_log_sink
+        PUBLIC absl::log_sink
+        PRIVATE absl::log_sink_registry absl::time Threads::Threads
+    )
+    if(FILESYSTEM_FOUND)
+        target_link_libraries(gnss_sdr_log_sink PRIVATE std::filesystem)
+        target_compile_definitions(gnss_sdr_log_sink PRIVATE HAS_STD_FILESYSTEM=1)
+        if(find_experimental)
+            target_compile_definitions(gnss_sdr_log_sink PRIVATE HAS_STD_FILESYSTEM_EXPERIMENTAL=1)
+        endif()
+    else()
+        target_link_libraries(gnss_sdr_log_sink PRIVATE Boost::filesystem $<$<BOOL:${NEED_BOOST_SYSTEM}>:Boost::system>)
+    endif()
+endif()

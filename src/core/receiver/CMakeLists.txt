@@ -6,20 +6,24 @@
 
 
 set(GNSS_RECEIVER_SOURCES
+    conditioner_scheduling_policy.cc
     control_thread.cc
     file_configuration.cc
     gnss_block_factory.cc
     gnss_flowgraph.cc
     in_memory_configuration.cc
+    satellite_visibility.cc
     tcp_cmd_interface.cc
 )
 
 set(GNSS_RECEIVER_HEADERS
+    conditioner_scheduling_policy.h
     control_thread.h
     file_configuration.h
     gnss_block_factory.h
     gnss_flowgraph.h
     in_memory_configuration.h
+    satellite_visibility.h
     tcp_cmd_interface.h
     concurrent_map.h
     concurrent_queue.h
@@ -74,6 +78,10 @@ if(ENABLE_ION)
     target_compile_definitions(core_receiver PRIVATE -DENABLE_ION_SOURCE=1)
 endif()
 
+if(ENABLE_EVK1029)
+    target_compile_definitions(core_receiver PRIVATE -DEVK1029_DRIVER=1)
+endif()
+
 if(GNURADIO_USES_STD_POINTERS)
     target_compile_definitions(core_receiver PUBLIC -DGNURADIO_USES_STD_POINTERS=1)
 endif()
@@ -124,6 +132,14 @@ if(ENABLE_LIMESDR)
     target_compile_definitions(core_receiver PRIVATE -DLIMESDR_DRIVER=1)
 endif()
 
+if(ENABLE_BLADERF)
+    target_compile_definitions(core_receiver PRIVATE -DBLADERF_DRIVER=1)
+endif()
+
+if(ENABLE_POCKETSDR)
+    target_compile_definitions(core_receiver PRIVATE -DPOCKETSDR_DRIVER=1)
+endif()
+
 if(ENABLE_ARRAY)
     target_compile_definitions(core_receiver PRIVATE -DRAW_ARRAY_DRIVER=1)
 endif()
@@ -149,6 +165,7 @@ if(ENABLE_CUDA)
         target_include_directories(core_receiver
             PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
         )
+        target_link_libraries(core_receiver PUBLIC CUDA::cudart)
     else()
         target_link_libraries(core_receiver
             PUBLIC ${CUDA_LIBRARIES}
@@ -158,7 +175,7 @@ if(ENABLE_CUDA)
         )
     endif()
     set_target_properties(core_receiver PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_SEPARABLE_COMPILATION OFF
         POSITION_INDEPENDENT_CODE ON
     )
     target_compile_definitions(core_receiver PRIVATE -DCUDA_GPU_ACCEL=1)

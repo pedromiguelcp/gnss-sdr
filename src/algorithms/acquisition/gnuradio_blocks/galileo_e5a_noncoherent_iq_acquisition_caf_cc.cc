@@ -28,6 +28,7 @@
 #include <volk_gnsssdr/volk_gnsssdr.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <exception>
 #include <sstream>
 
@@ -39,85 +40,61 @@
 
 
 galileo_e5a_noncoherentIQ_acquisition_caf_cc_sptr galileo_e5a_noncoherentIQ_make_acquisition_caf_cc(
-    unsigned int sampled_ms,
-    unsigned int max_dwells,
-    unsigned int doppler_max, int64_t fs_in,
-    int samples_per_ms, int samples_per_code,
-    bool bit_transition_flag,
-    bool dump,
-    const std::string &dump_filename,
-    bool both_signal_components_,
-    int CAF_window_hz_,
-    int Zero_padding_,
-    bool enable_monitor_output)
+    const Acq_Conf &conf,
+    bool both_signal_components,
+    int CAF_window_hz,
+    int Zero_padding)
 {
     return galileo_e5a_noncoherentIQ_acquisition_caf_cc_sptr(
-        new galileo_e5a_noncoherentIQ_acquisition_caf_cc(sampled_ms, max_dwells, doppler_max, fs_in, samples_per_ms,
-            samples_per_code, bit_transition_flag, dump, dump_filename, both_signal_components_, CAF_window_hz_, Zero_padding_, enable_monitor_output));
+        new galileo_e5a_noncoherentIQ_acquisition_caf_cc(conf, both_signal_components, CAF_window_hz, Zero_padding));
 }
 
 
 galileo_e5a_noncoherentIQ_acquisition_caf_cc::galileo_e5a_noncoherentIQ_acquisition_caf_cc(
-    unsigned int sampled_ms,
-    unsigned int max_dwells,
-    unsigned int doppler_max,
-    int64_t fs_in,
-    int samples_per_ms,
-    int samples_per_code,
-    bool bit_transition_flag,
-    bool dump,
-    const std::string &dump_filename,
-    bool both_signal_components_,
-    int CAF_window_hz_,
-    int Zero_padding_,
-    bool enable_monitor_output)
-    : gr::block("galileo_e5a_noncoherentIQ_acquisition_caf_cc",
+    const Acq_Conf &conf,
+    bool both_signal_components,
+    int CAF_window_hz,
+    int Zero_padding)
+    : acquisition_impl_interface("galileo_e5a_noncoherentIQ_acquisition_caf_cc",
           gr::io_signature::make(1, 1, sizeof(gr_complex)),
           gr::io_signature::make(0, 1, sizeof(Gnss_Synchro))),
-      d_dump_filename(dump_filename),
+      d_acq_params(conf),
       d_gnss_synchro(nullptr),
-      d_fs_in(fs_in),
       d_sample_counter(0ULL),
-      d_threshold(0),
-      d_doppler_freq(0),
       d_mag(0),
       d_input_power(0.0),
       d_test_statistics(0),
       d_state(0),
-      d_samples_per_ms(samples_per_ms),
-      d_samples_per_code(samples_per_code),
-      d_CAF_window_hz(CAF_window_hz_),
+      d_CAF_window_hz(CAF_window_hz),
       d_buffer_count(0),
       d_doppler_resolution(0),
-      d_doppler_max(static_cast<int>(doppler_max)),
-      d_doppler_step(250),
-      d_fft_size(static_cast<int>(sampled_ms) * d_samples_per_ms),
+      d_fft_size(static_cast<int>(conf.sampled_ms) * conf.samples_per_ms),
       d_num_doppler_bins(0),
       d_gr_stream_buffer(0),
       d_channel(0),
-      d_max_dwells(max_dwells),
       d_well_count(0),
       d_code_phase(0),
-      d_bit_transition_flag(bit_transition_flag),
       d_active(false),
-      d_dump(dump),
-      d_both_signal_components(both_signal_components_),
-      d_enable_monitor_output(enable_monitor_output)
+      d_both_signal_components(both_signal_components),
+      d_fft_if(gnss_fft_fwd_make_unique(d_fft_size)),
+      d_ifft(gnss_fft_rev_make_unique(d_fft_size)),
+      d_fft_code_I_A(d_fft_size),
+      d_inbuffer(d_fft_size),
+      d_magnitudeIA(d_fft_size)
 {
+    // A search needs its dwells beyond its first sample (GNSS-SDR.deterministic=true)
+    d_det.require_span(static_cast<uint64_t>(d_fft_size) * (std::max(1U, d_acq_params.max_dwells) + 1));
+
     this->message_port_register_out(pmt::mp("events"));
 
-    if (Zero_padding_ > 0)
+    if (Zero_padding > 0)
         {
             d_sampled_ms = 1;
         }
     else
         {
-            d_sampled_ms = sampled_ms;
+            d_sampled_ms = conf.sampled_ms;
         }
-
-    d_inbuffer = std::vector<gr_complex>(d_fft_size);
-    d_fft_code_I_A = std::vector<gr_complex>(d_fft_size);
-    d_magnitudeIA = std::vector<float>(d_fft_size);
 
     if (d_both_signal_components == true)
         {
@@ -137,8 +114,40 @@ galileo_e5a_noncoherentIQ_acquisition_caf_cc::galileo_e5a_noncoherentIQ_acquisit
                 }
         }
 
-    d_fft_if = gnss_fft_fwd_make_unique(d_fft_size);
-    d_ifft = gnss_fft_rev_make_unique(d_fft_size);
+    // Count the number of bins
+    for (int doppler = -d_acq_params.doppler_max; doppler <= d_acq_params.doppler_max; doppler += d_acq_params.doppler_step)
+        {
+            d_num_doppler_bins++;
+        }
+
+    // Create the carrier Doppler wipeoff signals
+    d_grid_doppler_wipeoffs = std::vector<std::vector<gr_complex>>(d_num_doppler_bins, std::vector<gr_complex>(d_fft_size));
+    for (int doppler_index = 0; doppler_index < d_num_doppler_bins; doppler_index++)
+        {
+            int doppler = -d_acq_params.doppler_max + d_acq_params.doppler_step * doppler_index;
+            float phase_step_rad = static_cast<float>(TWO_PI) * static_cast<float>(doppler) / static_cast<float>(d_acq_params.fs_in);
+            std::array<float, 1> _phase{};
+            volk_gnsssdr_s32f_sincos_32fc(d_grid_doppler_wipeoffs[doppler_index].data(), -phase_step_rad, _phase.data(), d_fft_size);
+        }
+
+    /* CAF Filtering to resolve doppler ambiguity. Phase and quadrature must be processed
+     * separately before non-coherent integration */
+    if (d_CAF_window_hz > 0)
+        {
+            d_CAF_vector = std::vector<float>(d_num_doppler_bins);
+            d_CAF_vector_I = std::vector<float>(d_num_doppler_bins);
+            if (d_both_signal_components == true)
+                {
+                    d_CAF_vector_Q = std::vector<float>(d_num_doppler_bins);
+                }
+        }
+
+    // While idle, general_work() only drains its input. Without a batching hint the
+    // scheduler wakes this block for every small burst of new input, which is pure
+    // scheduling overhead. Batching to one code period (1 ms) at this signal's own
+    // sample rate cuts the wakeup rate without changing behavior (see pcps_acquisition).
+    const auto output_multiple_samples = std::max<uint32_t>(1U, static_cast<uint32_t>(std::lround(conf.samples_per_ms)));
+    this->set_output_multiple(output_multiple_samples);
 }
 
 
@@ -146,14 +155,14 @@ galileo_e5a_noncoherentIQ_acquisition_caf_cc::~galileo_e5a_noncoherentIQ_acquisi
 {
     try
         {
-            if (d_dump)
+            if (d_acq_params.dump)
                 {
                     d_dump_file.close();
                 }
         }
     catch (const std::ofstream::failure &e)
         {
-            std::cerr << "Problem closing Acquisition dump file: " << d_dump_filename << '\n';
+            std::cerr << "Problem closing Acquisition dump file: " << d_acq_params.dump_filename << '\n';
         }
     catch (const std::exception &e)
         {
@@ -193,11 +202,11 @@ void galileo_e5a_noncoherentIQ_acquisition_caf_cc::set_local_code(std::complex<f
             auto minus_one = gr_complex(-1, 0);
             volk_32fc_s32fc_multiply2_32fc(&(d_fft_if->get_inbuf())[0],
                 &codeI[0], &minus_one,
-                d_samples_per_code);
+                static_cast<int32_t>(d_acq_params.samples_per_code));
 #else
             volk_32fc_s32fc_multiply_32fc(&(d_fft_if->get_inbuf())[0],
                 &codeI[0], gr_complex(-1, 0),
-                d_samples_per_code);
+                static_cast<int32_t>(d_acq_params.samples_per_code));
 #endif
             d_fft_if->execute();  // We need the FFT of local code
 
@@ -211,11 +220,11 @@ void galileo_e5a_noncoherentIQ_acquisition_caf_cc::set_local_code(std::complex<f
                     auto minus_one = gr_complex(-1, 0);
                     volk_32fc_s32fc_multiply2_32fc(&(d_fft_if->get_inbuf())[0],
                         &codeQ[0], &minus_one,
-                        d_samples_per_code);
+                        static_cast<int32_t>(d_acq_params.samples_per_code));
 #else
                     volk_32fc_s32fc_multiply_32fc(&(d_fft_if->get_inbuf())[0],
                         &codeQ[0], gr_complex(-1, 0),
-                        d_samples_per_code);
+                        static_cast<int32_t>(d_acq_params.samples_per_code));
 #endif
                     d_fft_if->execute();  // We need the FFT of local code
 
@@ -226,78 +235,24 @@ void galileo_e5a_noncoherentIQ_acquisition_caf_cc::set_local_code(std::complex<f
 }
 
 
-void galileo_e5a_noncoherentIQ_acquisition_caf_cc::init()
+int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items,
+    gr_vector_int &ninput_items, gr_vector_const_void_star &input_items,
+    gr_vector_void_star &output_items)
 {
-    d_gnss_synchro->Flag_valid_acquisition = false;
-    d_gnss_synchro->Flag_valid_symbol_output = false;
-    d_gnss_synchro->Flag_valid_pseudorange = false;
-    d_gnss_synchro->Flag_valid_word = false;
-
-    d_gnss_synchro->Acq_delay_samples = 0.0;
-    d_gnss_synchro->Acq_doppler_hz = 0.0;
-    d_gnss_synchro->Acq_doppler_step = 0U;
-    d_gnss_synchro->Acq_samplestamp_samples = 0ULL;
-    d_mag = 0.0;
-    d_input_power = 0.0;
-
-    // Count the number of bins
-    d_num_doppler_bins = 0;
-    for (int doppler = -d_doppler_max;
-        doppler <= d_doppler_max;
-        doppler += d_doppler_step)
+    d_det.begin_call(d_sample_counter);
+    const int produced = process_input(noutput_items, ninput_items, input_items, output_items);
+    if (d_det.enabled())
         {
-            d_num_doppler_bins++;
+            // GNSS-SDR.deterministic=true: results reach the control queue
+            // before the progress passes their stamp
+            d_det.dispatch(d_channel, [this](int event) { this->message_port_pub(pmt::mp("events"), pmt::from_long(event)); });
+            d_det.publish(d_sample_counter, d_active, d_channel);
         }
-
-    // Create the carrier Doppler wipeoff signals
-    d_grid_doppler_wipeoffs = std::vector<std::vector<gr_complex>>(d_num_doppler_bins, std::vector<gr_complex>(d_fft_size));
-    for (int doppler_index = 0; doppler_index < d_num_doppler_bins; doppler_index++)
-        {
-            int doppler = -d_doppler_max + d_doppler_step * doppler_index;
-            float phase_step_rad = static_cast<float>(TWO_PI) * static_cast<float>(doppler) / static_cast<float>(d_fs_in);
-            std::array<float, 1> _phase{};
-            volk_gnsssdr_s32f_sincos_32fc(d_grid_doppler_wipeoffs[doppler_index].data(), -phase_step_rad, _phase.data(), d_fft_size);
-        }
-
-    /* CAF Filtering to resolve doppler ambiguity. Phase and quadrature must be processed
-     * separately before non-coherent integration */
-    if (d_CAF_window_hz > 0)
-        {
-            d_CAF_vector = std::vector<float>(d_num_doppler_bins);
-            d_CAF_vector_I = std::vector<float>(d_num_doppler_bins);
-            if (d_both_signal_components == true)
-                {
-                    d_CAF_vector_Q = std::vector<float>(d_num_doppler_bins);
-                }
-        }
+    return produced;
 }
 
 
-void galileo_e5a_noncoherentIQ_acquisition_caf_cc::set_state(int state)
-{
-    d_state = state;
-    if (d_state == 1)
-        {
-            d_gnss_synchro->Acq_delay_samples = 0.0;
-            d_gnss_synchro->Acq_doppler_hz = 0.0;
-            d_gnss_synchro->Acq_samplestamp_samples = 0ULL;
-            d_gnss_synchro->Acq_doppler_step = 0U;
-            d_well_count = 0;
-            d_mag = 0.0;
-            d_input_power = 0.0;
-            d_test_statistics = 0.0;
-        }
-    else if (d_state == 0)
-        {
-        }
-    else
-        {
-            LOG(ERROR) << "State can only be set to 0 or 1";
-        }
-}
-
-
-int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items __attribute__((unused)),
+int galileo_e5a_noncoherentIQ_acquisition_caf_cc::process_input(int noutput_items __attribute__((unused)),
     gr_vector_int &ninput_items, gr_vector_const_void_star &input_items,
     gr_vector_void_star &output_items)
 {
@@ -315,32 +270,46 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
 
     int acquisition_message = -1;  // 0=STOP_CHANNEL 1=ACQ_SUCCEES 2=ACQ_FAIL
     int return_value = 0;          // 0=Produces no Gnss_Synchro objects
+
+    if (!d_active)
+        {
+            d_sample_counter += static_cast<uint64_t>(ninput_items[0]);  // sample counter
+            consume_each(ninput_items[0]);
+            return 0;
+        }
+
     /* States: 0 Stop Channel
      *         1 Load the buffer until it reaches fft_size
      *         2 Acquisition algorithm
      *         3 Positive acquisition
      *         4 Negative acquisition
      */
+    if (d_det.enabled() && d_state == 0)
+        {
+            // GNSS-SDR.deterministic=true: the search starts at its stamped sample
+            int n_items = 0;
+            if (!d_det.ready_to_start(d_sample_counter, 0, 1, ninput_items[0], n_items, d_channel))
+                {
+                    d_sample_counter += static_cast<uint64_t>(1) * static_cast<uint64_t>(n_items);
+                    consume_each(n_items);
+                    return 0;
+                }
+        }
+
     switch (d_state)
         {
         case 0:
             {
-                if (d_active)
-                    {
-                        // restart acquisition variables
-                        d_gnss_synchro->Acq_delay_samples = 0.0;
-                        d_gnss_synchro->Acq_doppler_hz = 0.0;
-                        d_gnss_synchro->Acq_samplestamp_samples = 0ULL;
-                        d_gnss_synchro->Acq_doppler_step = 0U;
-                        d_well_count = 0;
-                        d_mag = 0.0;
-                        d_input_power = 0.0;
-                        d_test_statistics = 0.0;
-                        d_state = 1;
-                    }
-                d_sample_counter += static_cast<uint64_t>(ninput_items[0]);  // sample counter
-                consume_each(ninput_items[0]);
-
+                // restart acquisition variables
+                d_gnss_synchro->Acq_delay_samples = 0.0;
+                d_gnss_synchro->Acq_doppler_hz = 0.0;
+                d_gnss_synchro->Acq_samplestamp_samples = 0ULL;
+                d_gnss_synchro->Acq_doppler_step = 0U;
+                d_well_count = 0;
+                d_mag = 0.0;
+                d_input_power = 0.0;
+                d_test_statistics = 0.0;
+                d_state = 1;
                 break;
             }
         case 1:
@@ -395,9 +364,10 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
 
                 DLOG(INFO) << "Channel: " << d_channel
                            << " , doing acquisition of satellite: " << d_gnss_synchro->System << " " << d_gnss_synchro->PRN
-                           << " ,sample stamp: " << d_sample_counter << ", threshold: "
-                           << d_threshold << ", doppler_max: " << d_doppler_max
-                           << ", doppler_step: " << d_doppler_step;
+                           << " , sample stamp: " << d_sample_counter
+                           << ", threshold: " << d_acq_params.threshold
+                           << ", doppler_max: " << d_acq_params.doppler_max
+                           << ", doppler_step: " << d_acq_params.doppler_step;
 
                 // 1- Compute the input signal power estimation
                 volk_32fc_magnitude_squared_32f(d_magnitudeIA.data(), d_inbuffer.data(), d_fft_size);
@@ -408,7 +378,7 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                 for (int doppler_index = 0; doppler_index < d_num_doppler_bins; doppler_index++)
                     {
                         // doppler search steps
-                        doppler = -static_cast<int>(d_doppler_max) + d_doppler_step * doppler_index;
+                        doppler = -d_acq_params.doppler_max + d_acq_params.doppler_step * doppler_index;
 
                         volk_32fc_x2_multiply_32fc(d_fft_if->get_inbuf(), d_inbuffer.data(),
                             d_grid_doppler_wipeoffs[doppler_index].data(), d_fft_size);
@@ -460,7 +430,7 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                                         d_ifft->execute();
                                         volk_32fc_magnitude_squared_32f(d_magnitudeQB.data(), d_ifft->get_outbuf(), d_fft_size);
                                         volk_gnsssdr_32f_index_max_32u(&indext_QB, d_magnitudeQB.data(), d_fft_size);
-                                        magt_QB = d_magnitudeIB[indext_QB] / (fft_normalization_factor * fft_normalization_factor);
+                                        magt_QB = d_magnitudeQB[indext_QB] / (fft_normalization_factor * fft_normalization_factor);
                                     }
                             }
 
@@ -574,19 +544,19 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                                 // the maximum test statistics in the previous dwell is greater than
                                 // current d_mag/d_input_power). Note that d_test_statistics is not
                                 // restarted between consecutive dwells in multidwell operation.
-                                if (d_test_statistics < (d_mag / d_input_power) || !d_bit_transition_flag)
+                                if (d_test_statistics < (d_mag / d_input_power) || !d_acq_params.bit_transition_flag)
                                     {
-                                        d_gnss_synchro->Acq_delay_samples = static_cast<double>(indext % d_samples_per_code);
+                                        d_gnss_synchro->Acq_delay_samples = static_cast<double>(indext % static_cast<int32_t>(d_acq_params.samples_per_code));
                                         d_gnss_synchro->Acq_doppler_hz = static_cast<double>(doppler);
                                         d_gnss_synchro->Acq_samplestamp_samples = d_sample_counter;
-                                        d_gnss_synchro->Acq_doppler_step = d_doppler_step;
+                                        d_gnss_synchro->Acq_doppler_step = d_acq_params.doppler_step;
                                         // 5- Compute the test statistics and compare to the threshold
                                         d_test_statistics = d_mag / d_input_power;
                                     }
                             }
 
                         // Record results to file if required
-                        if (d_dump)
+                        if (d_acq_params.dump)
                             {
                                 std::stringstream filename;
                                 std::streamsize n = sizeof(float) * (d_fft_size);  // noncomplex file write
@@ -618,7 +588,7 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                     {
                         int CAF_bins_half;
                         std::array<float, 1> accum{};
-                        CAF_bins_half = d_CAF_window_hz / (2 * d_doppler_step);
+                        CAF_bins_half = d_CAF_window_hz / (2 * d_acq_params.doppler_step);
                         float weighting_factor;
                         weighting_factor = 0.5F / static_cast<float>(CAF_bins_half);
                         // weighting_factor = 0;
@@ -686,10 +656,10 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
 
                         // Recompute the maximum doppler peak
                         volk_gnsssdr_32f_index_max_32u(&indext, d_CAF_vector.data(), d_num_doppler_bins);
-                        doppler = -d_doppler_max + d_doppler_step * static_cast<int>(indext);
+                        doppler = -d_acq_params.doppler_max + d_acq_params.doppler_step * static_cast<int>(indext);
                         d_gnss_synchro->Acq_doppler_hz = static_cast<double>(doppler);
                         // Dump if required, appended at the end of the file
-                        if (d_dump)
+                        if (d_acq_params.dump)
                             {
                                 std::stringstream filename;
                                 std::streamsize n = sizeof(float) * (d_num_doppler_bins);  // noncomplex file write
@@ -701,9 +671,9 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                             }
                     }
 
-                if (d_well_count == d_max_dwells)
+                if (d_well_count == d_acq_params.max_dwells)
                     {
-                        if (d_test_statistics > d_threshold)
+                        if (d_test_statistics > d_acq_params.threshold)
                             {
                                 d_state = 3;  // Positive acquisition
                             }
@@ -728,7 +698,7 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                 DLOG(INFO) << "satellite " << d_gnss_synchro->System << " " << d_gnss_synchro->PRN;
                 DLOG(INFO) << "sample_stamp " << d_sample_counter;
                 DLOG(INFO) << "test statistics value " << d_test_statistics;
-                DLOG(INFO) << "test statistics threshold " << d_threshold;
+                DLOG(INFO) << "test statistics threshold " << d_acq_params.threshold;
                 DLOG(INFO) << "code phase " << d_gnss_synchro->Acq_delay_samples;
                 DLOG(INFO) << "doppler " << d_gnss_synchro->Acq_doppler_hz;
                 DLOG(INFO) << "magnitude " << d_mag;
@@ -738,12 +708,21 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                 d_state = 0;
 
                 acquisition_message = 1;
-                this->message_port_pub(pmt::mp("events"), pmt::from_long(acquisition_message));
+                if (d_det.enabled())
+                    {
+                        d_det.raise(acquisition_message);
+                    }
+                else
+                    {
+                        this->message_port_pub(pmt::mp("events"), pmt::from_long(acquisition_message));
+                    }
                 d_sample_counter += static_cast<uint64_t>(ninput_items[0]);  // sample counter
                 consume_each(ninput_items[0]);
+                LOG(INFO) << "Successful acquisition in channel " << d_channel
+                          << " for satellite " << d_gnss_synchro->System << " " << d_gnss_synchro->PRN;
 
                 // Copy and push current Gnss_Synchro to monitor queue
-                if (d_enable_monitor_output)
+                if (d_acq_params.enable_monitor_output)
                     {
                         auto **out = reinterpret_cast<Gnss_Synchro **>(&output_items[0]);
                         Gnss_Synchro current_synchro_data = Gnss_Synchro();
@@ -761,7 +740,7 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                 DLOG(INFO) << "satellite " << d_gnss_synchro->System << " " << d_gnss_synchro->PRN;
                 DLOG(INFO) << "sample_stamp " << d_sample_counter;
                 DLOG(INFO) << "test statistics value " << d_test_statistics;
-                DLOG(INFO) << "test statistics threshold " << d_threshold;
+                DLOG(INFO) << "test statistics threshold " << d_acq_params.threshold;
                 DLOG(INFO) << "code phase " << d_gnss_synchro->Acq_delay_samples;
                 DLOG(INFO) << "doppler " << d_gnss_synchro->Acq_doppler_hz;
                 DLOG(INFO) << "magnitude " << d_mag;
@@ -773,7 +752,14 @@ int galileo_e5a_noncoherentIQ_acquisition_caf_cc::general_work(int noutput_items
                 d_sample_counter += static_cast<uint64_t>(ninput_items[0]);  // sample counter
                 consume_each(ninput_items[0]);
                 acquisition_message = 2;
-                this->message_port_pub(pmt::mp("events"), pmt::from_long(acquisition_message));
+                if (d_det.enabled())
+                    {
+                        d_det.raise(acquisition_message);
+                    }
+                else
+                    {
+                        this->message_port_pub(pmt::mp("events"), pmt::from_long(acquisition_message));
+                    }
                 break;
             }
         }

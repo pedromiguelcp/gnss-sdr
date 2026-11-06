@@ -1,0 +1,122 @@
+/*!
+ * \file evk1029_signal_source.h
+ * \brief SAPHYRION EVK1029 signal source. Reads a continuous, header-less
+ * raw capture file (OBA-encoded 4-bit samples) directly, without going
+ * through the generic XML-metadata-driven ION_GSMS_Signal_Source path.
+ *
+ * Successor of the old EVK10x9_signal_source: same overall structure
+ * (dedicated file reader + optional throttle + optional dump), updated
+ * for the current EVK1029 capture format (see evk1029_source.h).
+ *
+ * Set role + ".RF_channels" to N > 1 (e.g. for a multi-band setup sharing a
+ * single IF capture) to feed N Signal Conditioners from ONE underlying
+ * Evk1029Source instance/read, instead of instantiating N separate
+ * SignalSourceN blocks each reading the file independently. Evk1029Source
+ * has a single output port (see its own header); gnss_flowgraph.cc's
+ * generic signal-source-to-conditioner wiring detects this
+ * (output_signature()->max_streams() == 1) and connects each of the N
+ * Signal Conditioners to that same port, so all of them read the same
+ * sample stream and GNU Radio keeps them within one output buffer of each
+ * other. The optional throttle sits between the source and that shared
+ * port, so .enable_throttle_control works for any RF_channels value.
+ * Set role + ".seconds_to_skip" to start reading at a given time into the
+ * capture (converted to a byte position using the raw sampling frequency);
+ * only meaningful in (and only applied in) file mode.
+ *
+ * Set role + ".input" to "file" (default) or "shared_memory" to read the raw
+ * EVK1029 byte stream live from EVK1029_CtrlApp instead of a recorded file --
+ * see raw_stream_reader.h. role + ".shm_name" names the ring (default
+ * "/evk1029_stream"). A slow consumer blocks the producer (see shm_ring.h)
+ * rather than losing data there; a real overflow, reported by
+ * EVK1029_CtrlApp's IF_TO_AXIS flag as an event count, is logged by default
+ * or stops the stream if role + ".shm_stop_on_buffer_overflow" = true
+ * (default false). Overflows are counted from the first sample read, not
+ * while the flowgraph is being built. If the producer publishes nothing for
+ * role + ".shm_stall_timeout_s" seconds (default 5, 0 waits forever), the
+ * stream ends as if at EOF (a hung, crashed or restarted EVK1029_CtrlApp).
+ *
+ * With role + ".enable_freq_xlating" = true, Evk1029Source itself translates,
+ * filters and decimates each band (role + ".band<n>_*" parameters, n <
+ * RF_channels) and exposes one gr_complex output port per band, which the
+ * flowgraph wires to Signal Conditioner n. Pair it with Bypass Signal
+ * Conditioners to connect the channels straight to those ports. All bands
+ * share one decimation factor, and the throttle is not available in this
+ * mode. With .dump, each band is written to its own file (suffix _ch<n>).
+ *
+ * -----------------------------------------------------------------------------
+ *
+ * GNSS-SDR is a Global Navigation Satellite System software-defined receiver.
+ * This file is part of GNSS-SDR.
+ *
+ * Copyright (C) 2010-2026  (see AUTHORS file for a list of contributors)
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * -----------------------------------------------------------------------------
+ */
+
+#ifndef GNSS_SDR_EVK1029_SIGNAL_SOURCE_H
+#define GNSS_SDR_EVK1029_SIGNAL_SOURCE_H
+
+#include "concurrent_queue.h"
+#include "evk1029_source.h"
+#include "signal_source_base.h"
+#include <gnuradio/blocks/file_sink.h>
+#include <gnuradio/blocks/throttle.h>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+class ConfigurationInterface;
+
+/** \addtogroup Signal_Source
+ * \{ */
+/** \addtogroup Signal_Source_adapters
+ * \{ */
+
+
+/*!
+ * \brief This class reads a SAPHYRION EVK1029 raw capture file.
+ */
+class Evk1029SignalSource : public SignalSourceBase
+{
+public:
+    Evk1029SignalSource(
+        const ConfigurationInterface* configuration,
+        const std::string& role,
+        unsigned int in_stream,
+        unsigned int out_stream,
+        Concurrent_Queue<pmt::pmt_t>* queue);
+
+    ~Evk1029SignalSource() = default;
+
+    inline size_t item_size() override
+    {
+        return item_size_;
+    }
+
+    void connect(gr::top_block_sptr top_block) override;
+    void disconnect(gr::top_block_sptr top_block) override;
+    gr::basic_block_sptr get_right_block() override;
+    bool is_real_time() const override { return shared_memory_input_ || enable_throttle_control_; }
+    bool can_wait() const override { return !shared_memory_input_; }  // a throttle waits too, a live stream does not
+
+private:
+    Evk1029Source_sptr evk1029_source_;
+    gr::blocks::throttle::sptr throttle_;
+    std::vector<gr::blocks::file_sink::sptr> file_sinks_;
+
+    std::string dump_filename_;
+    bool dump_;
+
+    size_t item_size_;
+    unsigned int rf_channels_;
+
+    bool enable_throttle_control_;
+    bool enable_freq_xlating_;
+    bool shared_memory_input_;
+};
+
+
+/** \} */
+/** \} */
+#endif  // GNSS_SDR_EVK1029_SIGNAL_SOURCE_H

@@ -9,6 +9,8 @@ add_subdirectory(rtklib)
 
 set(GNSS_SPLIBS_SOURCES
     beidou_b1i_signal_replica.cc
+    beidou_b1c_signal_replica.cc
+    beidou_b2a_signal_replica.cc
     beidou_b3i_signal_replica.cc
     galileo_e1_signal_replica.cc
     galileo_e5_signal_replica.cc
@@ -16,6 +18,7 @@ set(GNSS_SPLIBS_SOURCES
     glonass_l1_signal_replica.cc
     glonass_l2_signal_replica.cc
     gps_l2c_signal_replica.cc
+    gps_l1c_signal_replica.cc
     gps_l5_signal_replica.cc
     gnss_signal_replica.cc
     gps_sdr_signal_replica.cc
@@ -30,12 +33,18 @@ set(GNSS_SPLIBS_SOURCES
     geofunctions.cc
     item_type_helpers.cc
     pass_through.cc
+    stream_batcher.cc
+    stream_batcher_deadline.cc
     short_x2_to_cshort.cc
     gnss_sdr_string_literals.cc
+    qzss_signal_replica.cc
+    sbas_signal_replica.cc
 )
 
 set(GNSS_SPLIBS_HEADERS
     beidou_b1i_signal_replica.h
+    beidou_b1c_signal_replica.h
+    beidou_b2a_signal_replica.h
     beidou_b3i_signal_replica.h
     galileo_e1_signal_replica.h
     galileo_e5_signal_replica.h
@@ -43,6 +52,7 @@ set(GNSS_SPLIBS_HEADERS
     glonass_l1_signal_replica.h
     glonass_l2_signal_replica.h
     gps_l2c_signal_replica.h
+    gps_l1c_signal_replica.h
     gps_l5_signal_replica.h
     gnss_signal_replica.h
     gps_sdr_signal_replica.h
@@ -62,9 +72,15 @@ set(GNSS_SPLIBS_HEADERS
     item_type_helpers.h
     trackingcmd.h
     pass_through.h
+    stream_batcher.h
+    stream_batcher_deadline.h
+    stream_batcher_limits.h
     short_x2_to_cshort.h
     gnss_sdr_string_literals.h
     gnss_time.h
+    matlab_writter_helper.h
+    qzss_signal_replica.h
+    sbas_signal_replica.h
 )
 
 set(GNSS_SPLIBS_HEADERS ${GNSS_SPLIBS_HEADERS}
@@ -110,6 +126,14 @@ else()
     add_library(algorithms_libs ${GNSS_SPLIBS_SOURCES} ${GNSS_SPLIBS_HEADERS})
 endif()
 
+# buffer_reader moved out of buffer.h in newer GNU Radio releases.
+find_path(GNURADIO_BUFFER_READER_INCLUDE_DIR gnuradio/buffer_reader.h
+    HINTS ${GNURADIO_RUNTIME_INCLUDE_DIRS}
+)
+if(GNURADIO_BUFFER_READER_INCLUDE_DIR)
+    target_compile_definitions(algorithms_libs PRIVATE GNURADIO_HAS_BUFFER_READER_H=1)
+endif()
+
 if(NOT has_span)
     target_include_directories(algorithms_libs
         PUBLIC
@@ -126,6 +150,7 @@ target_link_libraries(algorithms_libs
         Gnuradio::fft
         Gnuradio::pmt
     PRIVATE
+        Threads::Threads
         core_system_parameters
         Volk::volk
         Volkgnsssdr::volkgnsssdr

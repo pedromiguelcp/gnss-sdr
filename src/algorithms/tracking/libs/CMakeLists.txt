@@ -7,6 +7,7 @@
 
 set(TRACKING_LIB_SOURCES
     cpu_multicorrelator.cc
+    deterministic_tracking.cc
     cpu_multicorrelator_real_codes.cc
     cpu_multicorrelator_16sc.cc
     lock_detectors.cc
@@ -20,10 +21,12 @@ set(TRACKING_LIB_SOURCES
     kf_conf.cc
     bayesian_estimation.cc
     exponential_smoother.cc
+    bit_synchronizer.cc
 )
 
 set(TRACKING_LIB_HEADERS
     cpu_multicorrelator.h
+    deterministic_tracking.h
     cpu_multicorrelator_real_codes.h
     cpu_multicorrelator_16sc.h
     lock_detectors.h
@@ -38,10 +41,12 @@ set(TRACKING_LIB_HEADERS
     kf_conf.h
     bayesian_estimation.h
     exponential_smoother.h
+    bit_synchronizer.h
 )
 
 if(ENABLE_CUDA)
-    list(APPEND CUDA_NVCC_FLAGS "-gencode arch=compute_30,code=sm_30; -O3; -use_fast_math -default-stream per-thread")
+    # Architecture selection is driven by CMAKE_CUDA_ARCHITECTURES (see the
+    # top-level CMakeLists.txt); do not hardcode -gencode flags here.
     if(CMAKE_VERSION VERSION_GREATER 3.11)
         set(TRACKING_LIB_SOURCES ${TRACKING_LIB_SOURCES} cuda_multicorrelator.cu)
         set(TRACKING_LIB_HEADERS ${TRACKING_LIB_HEADERS} cuda_multicorrelator.h)
@@ -91,6 +96,14 @@ target_link_libraries(tracking_libs
         Gnuradio::runtime
 )
 
+# buffer_reader moved out of buffer.h in newer GNU Radio releases.
+find_path(GNURADIO_BUFFER_READER_INCLUDE_DIR gnuradio/buffer_reader.h
+    HINTS ${GNURADIO_RUNTIME_INCLUDE_DIRS}
+)
+if(GNURADIO_BUFFER_READER_INCLUDE_DIR)
+    target_compile_definitions(tracking_libs PRIVATE GNURADIO_HAS_BUFFER_READER_H=1)
+endif()
+
 if(ENABLE_GLOG_AND_GFLAGS)
     target_link_libraries(tracking_libs PRIVATE Glog::glog)
     target_compile_definitions(tracking_libs PRIVATE -DUSE_GLOG_AND_GFLAGS=1)
@@ -103,6 +116,10 @@ if(ENABLE_CUDA)
         target_include_directories(tracking_libs
             PUBLIC ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
         )
+        target_link_libraries(tracking_libs PUBLIC CUDA::cudart)
+        target_compile_options(tracking_libs PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--default-stream=per-thread>
+        )
     else()
         target_link_libraries(tracking_libs
             PUBLIC ${CUDA_LIBRARIES}
@@ -112,7 +129,7 @@ if(ENABLE_CUDA)
         )
     endif()
     set_target_properties(tracking_libs PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_SEPARABLE_COMPILATION OFF
         POSITION_INDEPENDENT_CODE ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
